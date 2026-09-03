@@ -11,14 +11,20 @@ import { NATIVE_DECIMALS, NATIVE_SYMBOL, RPC_URL } from "./config";
 
 export const bradbury = defineChain({
   id: 4221,
-  name: "GenLayer Bradbury",
+  name: "Genlayer Bradbury Testnet",
   nativeCurrency: {
-    name: "GEN",
+    name: "GEN Token",
     symbol: NATIVE_SYMBOL,
     decimals: NATIVE_DECIMALS,
   },
   rpcUrls: {
     default: { http: [RPC_URL] },
+  },
+  blockExplorers: {
+    default: {
+      name: "GenLayer Bradbury Explorer",
+      url: "https://explorer-bradbury.genlayer.com",
+    },
   },
   testnet: true,
 });

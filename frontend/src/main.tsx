@@ -4,7 +4,7 @@ import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WagmiProvider } from "wagmi";
 import "@rainbow-me/rainbowkit/styles.css";
-import { RainbowKitProvider, wagmiConfig } from "./lib/wagmi";
+import { RainbowKitProvider, wagmiConfig, bradbury } from "./lib/wagmi";
 import { routeTree } from "./routeTree";
 import "./styles.css";
 
@@ -26,7 +26,7 @@ ReactDOM.createRoot(document.getElementById("app")!).render(
   <React.StrictMode>
     <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>
-        <RainbowKitProvider theme={undefined}>
+        <RainbowKitProvider initialChain={bradbury} theme={undefined}>
           <RouterProvider router={router} />
         </RainbowKitProvider>
       </QueryClientProvider>

@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useAccount } from "wagmi";
+import { useAccount, useChainId, useSwitchChain } from "wagmi";
+import { NETWORK_CHAIN_ID } from "./config";
 import type { Asset } from "./config";
 import {
   claimTx,
@@ -20,6 +21,30 @@ import { isConfigured } from "./genlayer";
 function requireAccount(address?: string): string {
   if (!address) throw new Error("Connect a wallet before sending a transaction");
   return address;
+}
+
+// Ensures the connected wallet is on Bradbury (chain 4221) before a
+// write goes out. If the wallet is on the wrong chain, wagmi's
+// switchChain triggers wallet_switchEthereumChain and, when the wallet
+// doesn't know Bradbury yet, wallet_addEthereumChain — both surface a
+// prompt in the wallet UI.
+function useEnsureBradbury() {
+  const chainId = useChainId();
+  const { switchChainAsync } = useSwitchChain();
+  return async () => {
+    if (chainId === NETWORK_CHAIN_ID) return;
+    try {
+      await switchChainAsync({ chainId: NETWORK_CHAIN_ID });
+    } catch (e) {
+      const msg =
+        (e as { shortMessage?: string; message?: string })?.shortMessage ??
+        (e as Error)?.message ??
+        String(e);
+      throw new Error(
+        `Please switch your wallet to Genlayer Bradbury Testnet (chain ${NETWORK_CHAIN_ID}). ${msg}`,
+      );
+    }
+  };
 }
 
 const enabled = () => isConfigured();
@@ -101,9 +126,12 @@ export function useUserMarkets(wallet: string | undefined) {
 export function useCreateMarket() {
   const qc = useQueryClient();
   const { address } = useAccount();
+  const ensureChain = useEnsureBradbury();
   return useMutation({
-    mutationFn: ({ asset, day }: { asset: Asset; day: string }) =>
-      createMarketTx(requireAccount(address), asset, day),
+    mutationFn: async ({ asset, day }: { asset: Asset; day: string }) => {
+      await ensureChain();
+      return createMarketTx(requireAccount(address), asset, day);
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["markets"] });
       qc.invalidateQueries({ queryKey: ["open-markets"] });
@@ -114,8 +142,9 @@ export function useCreateMarket() {
 export function useTakePosition() {
   const qc = useQueryClient();
   const { address } = useAccount();
+  const ensureChain = useEnsureBradbury();
   return useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       marketId,
       side,
       stakeWei,
@@ -123,7 +152,10 @@ export function useTakePosition() {
       marketId: number;
       side: "UP" | "DOWN";
       stakeWei: bigint;
-    }) => takePositionTx(requireAccount(address), marketId, side, stakeWei),
+    }) => {
+      await ensureChain();
+      return takePositionTx(requireAccount(address), marketId, side, stakeWei);
+    },
     onSuccess: (_r, vars) => {
       qc.invalidateQueries({ queryKey: ["market", vars.marketId] });
       qc.invalidateQueries({ queryKey: ["markets"] });
@@ -135,9 +167,12 @@ export function useTakePosition() {
 export function useResolve() {
   const qc = useQueryClient();
   const { address } = useAccount();
+  const ensureChain = useEnsureBradbury();
   return useMutation({
-    mutationFn: (marketId: number) =>
-      resolveMarketTx(requireAccount(address), marketId),
+    mutationFn: async (marketId: number) => {
+      await ensureChain();
+      return resolveMarketTx(requireAccount(address), marketId);
+    },
     onSuccess: (_r, marketId) => {
       qc.invalidateQueries({ queryKey: ["market", marketId] });
       qc.invalidateQueries({ queryKey: ["evidence", marketId] });
@@ -148,9 +183,12 @@ export function useResolve() {
 export function useClaim() {
   const qc = useQueryClient();
   const { address } = useAccount();
+  const ensureChain = useEnsureBradbury();
   return useMutation({
-    mutationFn: (marketId: number) =>
-      claimTx(requireAccount(address), marketId),
+    mutationFn: async (marketId: number) => {
+      await ensureChain();
+      return claimTx(requireAccount(address), marketId);
+    },
     onSuccess: (_r, marketId) => {
       qc.invalidateQueries({ queryKey: ["market", marketId] });
       qc.invalidateQueries({ queryKey: ["claimable", marketId] });
