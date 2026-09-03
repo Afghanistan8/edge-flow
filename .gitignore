@@ -21,4 +21,5 @@ frontend/src/**/*.js
 .DS_Store
 .vscode/
 .idea/
+.claude/
 *.log

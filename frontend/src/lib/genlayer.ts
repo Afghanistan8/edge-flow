@@ -1,17 +1,42 @@
-// Thin wrapper around genlayer-js for the Edge-Flow contract.
+// Thin wrapper around genlayer-js against GenLayer Bradbury.
 //
-// The frontend only reads views and submits transactions. It never
-// decides settlement — the contract's own validator fetch does.
-//
-// If VITE_EDGEFLOW_CONTRACT_ADDRESS is unset the app renders a friendly
-// "not configured" state instead of crashing.
+// genlayer-js ships chain configs for localnet and testnetAsimov only, so
+// we clone testnetAsimov (same chain id 4221) and override the RPC and
+// the Bradbury consensus contract addresses.
 
 import { CONTRACT_ADDRESS, RPC_URL } from "./config";
+import { createClient, chains } from "genlayer-js";
 
-// genlayer-js exports vary across releases; import defensively and give
-// callers a stable minimal surface.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = any;
+
+const BRADBURY_MAIN = "0x0112Bf6e83497965A5fdD6Dad1E447a6E004271D";
+const BRADBURY_DATA = "0x85D7bf947A512Fc640C75327A780c90847267697";
+
+function bradburyChain() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const asimov = (chains as any).testnetAsimov;
+  return {
+    ...asimov,
+    id: 4221,
+    name: "Genlayer Bradbury Testnet",
+    rpcUrls: { default: { http: [RPC_URL] } },
+    blockExplorers: {
+      default: {
+        name: "GenLayer Bradbury Explorer",
+        url: "https://explorer-bradbury.genlayer.com/",
+      },
+    },
+    consensusMainContract: {
+      ...asimov.consensusMainContract,
+      address: BRADBURY_MAIN,
+    },
+    consensusDataContract: {
+      ...asimov.consensusDataContract,
+      address: BRADBURY_DATA,
+    },
+  };
+}
 
 let cachedClient: AnyClient | null = null;
 
@@ -19,27 +44,9 @@ export function isConfigured(): boolean {
   return CONTRACT_ADDRESS.startsWith("0x") && CONTRACT_ADDRESS.length === 42;
 }
 
-async function makeClient(): Promise<AnyClient> {
+function client(): AnyClient {
   if (cachedClient) return cachedClient;
-  const mod = (await import("genlayer-js")) as Record<string, unknown> & {
-    default?: Record<string, unknown>;
-  };
-  // Fall back to raw fetch if genlayer-js is not present in this env; the
-  // build still succeeds because we import dynamically.
-  const create =
-    (mod.createClient as (opts: unknown) => AnyClient | undefined) ??
-    (mod.default?.createClient as (opts: unknown) => AnyClient | undefined);
-  if (typeof create !== "function") {
-    throw new Error("genlayer-js: createClient not found");
-  }
-  cachedClient = create({
-    chain: {
-      id: 61_999,
-      name: "GenLayer Bradbury",
-      rpcUrls: { default: { http: [RPC_URL] } },
-      nativeCurrency: { name: "GEN", symbol: "GEN", decimals: 18 },
-    },
-  });
+  cachedClient = createClient({ chain: bradburyChain() });
   return cachedClient;
 }
 
@@ -48,21 +55,11 @@ export async function readContract<T = unknown>(
   args: unknown[] = [],
 ): Promise<T> {
   if (!isConfigured()) throw new Error("Edge-Flow contract not configured");
-  // Prefer genlayer-js client if available; otherwise fall back to a
-  // best-effort JSON-RPC readContract call.
-  try {
-    const client = await makeClient();
-    if (typeof client.readContract === "function") {
-      return (await client.readContract({
-        address: CONTRACT_ADDRESS,
-        functionName: method,
-        args,
-      })) as T;
-    }
-  } catch {
-    /* fall through */
-  }
-  return jsonRpcRead<T>(method, args);
+  return (await client().readContract({
+    address: CONTRACT_ADDRESS,
+    functionName: method,
+    args,
+  })) as T;
 }
 
 export async function writeContract(
@@ -70,32 +67,10 @@ export async function writeContract(
   args: unknown[] = [],
   opts: { value?: bigint } = {},
 ): Promise<string> {
-  const client = await makeClient();
-  if (typeof client.writeContract !== "function") {
-    throw new Error("genlayer-js: writeContract not available in this env");
-  }
-  return (await client.writeContract({
+  return (await client().writeContract({
     address: CONTRACT_ADDRESS,
     functionName: method,
     args,
-    value: opts.value,
+    value: opts.value ?? 0n,
   })) as string;
-}
-
-async function jsonRpcRead<T>(method: string, args: unknown[]): Promise<T> {
-  const body = {
-    jsonrpc: "2.0",
-    id: 1,
-    method: "gen_readContract",
-    params: [{ address: CONTRACT_ADDRESS, method, args }],
-  };
-  const res = await fetch(RPC_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`RPC ${res.status}`);
-  const json = (await res.json()) as { result?: T; error?: { message: string } };
-  if (json.error) throw new Error(json.error.message);
-  return json.result as T;
 }

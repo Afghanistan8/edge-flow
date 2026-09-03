@@ -10,7 +10,7 @@ import {
 import { NATIVE_DECIMALS, NATIVE_SYMBOL, RPC_URL } from "./config";
 
 export const bradbury = defineChain({
-  id: 61_999,
+  id: 4221,
   name: "GenLayer Bradbury",
   nativeCurrency: {
     name: "GEN",

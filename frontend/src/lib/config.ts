@@ -7,11 +7,11 @@ export const CONTRACT_ADDRESS = (
 
 export const RPC_URL = (
   import.meta.env.VITE_GENLAYER_RPC_URL ??
-  "https://bradbury.genlayer.com/api"
+  "https://rpc-bradbury.genlayer.com"
 ).trim();
 
 export const NETWORK_NAME = "GenLayer Bradbury Testnet";
-export const NETWORK_CHAIN_ID = 61_999; // Bradbury testnet chain id
+export const NETWORK_CHAIN_ID = 4221;
 export const NATIVE_SYMBOL = "GEN";
 export const NATIVE_DECIMALS = 18;
 

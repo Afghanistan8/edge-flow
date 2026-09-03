@@ -1,12 +1,13 @@
 """Shared in-process GenLayer shim for Edge-Flow tests.
 
-Lives at tests/conftest.py so it is loaded exactly once, no matter which
-subdirectory (direct/ or consensus/) collects the test. Every subdir
-inherits these fixtures and helpers.
+Emulates enough of the real GenVM SDK to run the same contract source
+that gets deployed to Bradbury. Loaded exactly once via tests/conftest.py
+regardless of which subdirectory (direct/ or consensus/) collects.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import sys
 import types
@@ -61,9 +62,24 @@ class _Address(str):
 
 class _Message:
     def __init__(self):
-        self.sender_address = _Address("0x0000000000000000000000000000000000000000")
+        self.sender_address = _Address(
+            "0x0000000000000000000000000000000000000000"
+        )
+        self.contract_address = _Address(
+            "0x0000000000000000000000000000000000000001"
+        )
         self.value = 0
         self.timestamp = 0
+
+
+class _Web:
+    def __init__(self, outer):
+        self.outer = outer
+
+    def get(self, url):
+        if self.outer._handler is None:
+            raise RuntimeError("no nondet handler registered")
+        return self.outer._handler(url)
 
 
 class _Nondet:
@@ -73,18 +89,9 @@ class _Nondet:
     def set_handler(self, fn):
         self._handler = fn
 
-    class _Web:
-        def __init__(self, outer):
-            self.outer = outer
-
-        def get(self, url):
-            if self.outer._handler is None:
-                raise RuntimeError("no nondet handler registered")
-            return self.outer._handler(url)
-
     @property
     def web(self):
-        return _Nondet._Web(self)
+        return _Web(self)
 
 
 class _PayableAccessor:
@@ -102,21 +109,40 @@ class _WriteAccessor:
     payable = property(lambda self: _PayableAccessor())
 
 
+class _ViewAccessor:
+    def __call__(self, fn):
+        return fn
+
+
 class _PublicAccessor:
     write = _WriteAccessor()
-
-    class _ViewAccessor:
-        def __call__(self, fn):
-            return fn
-
     view = _ViewAccessor()
+
+
+class _EqPrinciple:
+    @staticmethod
+    def strict_eq(fn):
+        return fn()
+
+
+class _ContractProxy:
+    """Returned by gl.get_contract_at(addr) — supports .emit_transfer."""
+
+    def __init__(self, addr):
+        self._addr = addr
+
+    def emit_transfer(self, *, value):
+        ledger.setdefault(str(self._addr).lower(), 0)
+        ledger[str(self._addr).lower()] += int(value)
 
 
 class _Contract:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         anno = getattr(cls, "__annotations__", {})
-        cls.__tm_fields__ = [n for n, t in anno.items() if "TreeMap" in str(t)]
+        cls.__tm_fields__ = [
+            n for n, t in anno.items() if "TreeMap" in str(t)
+        ]
 
     def __new__(cls, *args, **kwargs):
         obj = object.__new__(cls)
@@ -132,9 +158,14 @@ class _GL:
         self.public = _PublicAccessor()
         self.Contract = _Contract
         self.TreeMap = _TreeMap
+        self.eq_principle = _EqPrinciple()
         self.vm = types.SimpleNamespace(
-            run_nondet_unsafe=lambda fn, *a, **kw: fn(*a, **kw)
+            run_nondet_unsafe=lambda fn, *a, **kw: fn(*a, **kw),
+            UserError=Exception,
         )
+
+    def get_contract_at(self, addr):
+        return _ContractProxy(addr)
 
 
 gl = _GL()
@@ -145,16 +176,59 @@ class _U256(int):
         return super().__new__(cls, int(v))
 
 
+def _allow_storage(cls):
+    # In real GenVM this registers the class as storage-eligible. Here we
+    # just tag it and return it unchanged so @dataclass keeps working.
+    setattr(cls, "__gl_allow_storage__", True)
+    return cls
+
+
+# Public `genlayer` module namespace — `from genlayer import *` needs
+# these names.
 types_mod = types.ModuleType("genlayer.types")
 types_mod.Address = _Address
 types_mod.u256 = _U256
+types_mod.TreeMap = _TreeMap
 
 genlayer_pkg = types.ModuleType("genlayer")
 genlayer_pkg.gl = gl
 genlayer_pkg.types = types_mod
+genlayer_pkg.Address = _Address
+genlayer_pkg.u256 = _U256
+genlayer_pkg.TreeMap = _TreeMap
+genlayer_pkg.allow_storage = _allow_storage
+# Also expose the integer-width aliases some contracts import.
+for _n in ("u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64",
+          "i128", "bigint"):
+    setattr(genlayer_pkg, _n, _U256)
+genlayer_pkg.__all__ = [
+    "gl", "Address", "u256", "TreeMap", "allow_storage",
+]
 
 sys.modules["genlayer"] = genlayer_pkg
 sys.modules["genlayer.types"] = types_mod
+
+
+# ---------------------------------------------------------------------------
+# datetime.now() patch so contract code that uses it sees the warped clock
+# ---------------------------------------------------------------------------
+
+_real_datetime = _dt.datetime
+
+
+class _WarpedDatetime(_real_datetime):
+    @classmethod
+    def now(cls, tz=None):
+        ts = gl.message.timestamp
+        if not ts:
+            return _real_datetime.now(tz)
+        d = _real_datetime.fromtimestamp(int(ts), _dt.timezone.utc)
+        if tz is not None:
+            return d.astimezone(tz)
+        return d.replace(tzinfo=None)
+
+
+_dt.datetime = _WarpedDatetime  # type: ignore
 
 
 # ---------------------------------------------------------------------------
