@@ -38,8 +38,14 @@ export function Header() {
         </div>
       )}
       <div className="max-w-6xl mx-auto flex items-center gap-6 px-5 py-3">
-        <Link to="/" className="flex items-center gap-2 group">
-          <span className="ef-tick" />
+        <Link to="/" className="flex items-center gap-2.5 group">
+          <img
+            src="/logo.svg"
+            alt=""
+            width={26}
+            height={26}
+            className="rounded-lg border border-[var(--ef-edge)]"
+          />
           <span className="ef-mono text-[13px] tracking-widest uppercase">
             edge<span className="text-[var(--ef-accent)]">·</span>flow
           </span>
