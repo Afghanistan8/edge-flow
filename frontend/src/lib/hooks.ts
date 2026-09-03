@@ -123,6 +123,28 @@ export function useUserMarkets(wallet: string | undefined) {
 
 // -------- writes ----------
 
+/**
+ * After any write the whole market view can shift — pools, phase,
+ * position, claimable, evidence, and the portfolio list. Invalidate the
+ * lot rather than guessing which slice moved.
+ */
+function invalidateAll(qc: ReturnType<typeof useQueryClient>, id?: number) {
+  qc.invalidateQueries({ queryKey: ["markets"] });
+  qc.invalidateQueries({ queryKey: ["open-markets"] });
+  qc.invalidateQueries({ queryKey: ["user-markets"] });
+  if (id !== undefined) {
+    qc.invalidateQueries({ queryKey: ["market", id] });
+    qc.invalidateQueries({ queryKey: ["position", id] });
+    qc.invalidateQueries({ queryKey: ["claimable", id] });
+    qc.invalidateQueries({ queryKey: ["evidence", id] });
+  } else {
+    qc.invalidateQueries({ queryKey: ["market"] });
+    qc.invalidateQueries({ queryKey: ["position"] });
+    qc.invalidateQueries({ queryKey: ["claimable"] });
+    qc.invalidateQueries({ queryKey: ["evidence"] });
+  }
+}
+
 export function useCreateMarket() {
   const qc = useQueryClient();
   const { address } = useAccount();
@@ -132,10 +154,7 @@ export function useCreateMarket() {
       await ensureChain();
       return createMarketTx(requireAccount(address), asset, day);
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["markets"] });
-      qc.invalidateQueries({ queryKey: ["open-markets"] });
-    },
+    onSuccess: () => invalidateAll(qc),
   });
 }
 
@@ -156,11 +175,7 @@ export function useTakePosition() {
       await ensureChain();
       return takePositionTx(requireAccount(address), marketId, side, stakeWei);
     },
-    onSuccess: (_r, vars) => {
-      qc.invalidateQueries({ queryKey: ["market", vars.marketId] });
-      qc.invalidateQueries({ queryKey: ["markets"] });
-      qc.invalidateQueries({ queryKey: ["position", vars.marketId] });
-    },
+    onSuccess: (_r, vars) => invalidateAll(qc, vars.marketId),
   });
 }
 
@@ -173,10 +188,7 @@ export function useResolve() {
       await ensureChain();
       return resolveMarketTx(requireAccount(address), marketId);
     },
-    onSuccess: (_r, marketId) => {
-      qc.invalidateQueries({ queryKey: ["market", marketId] });
-      qc.invalidateQueries({ queryKey: ["evidence", marketId] });
-    },
+    onSuccess: (_r, marketId) => invalidateAll(qc, marketId),
   });
 }
 
@@ -189,9 +201,6 @@ export function useClaim() {
       await ensureChain();
       return claimTx(requireAccount(address), marketId);
     },
-    onSuccess: (_r, marketId) => {
-      qc.invalidateQueries({ queryKey: ["market", marketId] });
-      qc.invalidateQueries({ queryKey: ["claimable", marketId] });
-    },
+    onSuccess: (_r, marketId) => invalidateAll(qc, marketId),
   });
 }

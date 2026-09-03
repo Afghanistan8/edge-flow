@@ -12,5 +12,15 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    proxy: {
+      // Mirrors the /gate rewrite in vercel.json so the display-only
+      // price chart works in dev too. api.gateio.ws sends no CORS
+      // headers, so the browser cannot call it directly.
+      "/gate": {
+        target: "https://api.gateio.ws",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/gate/, ""),
+      },
+    },
   },
 });

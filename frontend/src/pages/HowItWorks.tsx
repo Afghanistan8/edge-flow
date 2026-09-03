@@ -30,10 +30,13 @@ export function HowItWorksPage() {
       <Section
         title="3 · Two independent sources"
         body={
-          "The contract re-fetches two public feeds. Coinmarket (a keyless " +
-          "Coinmarket-family price API) and Gate.io spot candlesticks. For " +
-          "each feed the contract picks the open at day-start and the close at " +
-          "day-end, then labels UP if close > open, DOWN otherwise."
+          "The contract re-fetches two public, keyless feeds: CoinGecko's " +
+          "market-chart range endpoint and Gate.io spot candlesticks. For " +
+          "each feed the contract picks the open at day-start and the close " +
+          "at day-end, then labels UP if close > open, DOWN otherwise. " +
+          "(Contract storage still names the first source's fields " +
+          "coinmarket_* for historical reasons — the URL it actually fetches " +
+          "is CoinGecko's public API.)"
         }
       />
 

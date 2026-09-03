@@ -1,6 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
+    {
+      "source": "/gate/:path*",
+      "destination": "https://api.gateio.ws/:path*"
+    },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

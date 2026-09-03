@@ -121,6 +121,35 @@ def _gmt1_day_start_utc(target_day: str) -> int:
     return _days_from_civil(y, m, d) * DAY - GMT_PLUS_ONE
 
 
+def _parse_iso_utc(s: str) -> int:
+    """Parse an ISO-8601 UTC datetime into unix seconds.
+
+    Accepts the shapes GenVM puts in ``message_raw['datetime']``:
+    ``YYYY-MM-DDTHH:MM:SS``, optionally with fractional seconds and a
+    ``Z`` / ``+00:00`` suffix. Hand-rolled rather than using the datetime
+    module so the conversion is pure, total, and has no import-time
+    dependency inside the VM.
+    """
+    if not isinstance(s, str) or len(s) < 19:
+        raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+    if s[4] != "-" or s[7] != "-" or s[10] not in ("T", " "):
+        raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+    if s[13] != ":" or s[16] != ":":
+        raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+    y_s, mo_s, d_s = s[0:4], s[5:7], s[8:10]
+    h_s, mi_s, sec_s = s[11:13], s[14:16], s[17:19]
+    for part in (y_s, mo_s, d_s, h_s, mi_s, sec_s):
+        if not part.isdigit():
+            raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+    y, mo, d = int(y_s), int(mo_s), int(d_s)
+    hh, mi, sec = int(h_s), int(mi_s), int(sec_s)
+    if mo < 1 or mo > 12 or d < 1 or d > _days_in_month(y, mo):
+        raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+    if hh > 23 or mi > 59 or sec > 60:  # 60 tolerates a leap second
+        raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+    return _days_from_civil(y, mo, d) * DAY + hh * 3600 + mi * 60 + sec
+
+
 # ---------------------------------------------------------------------------
 # HTTP source templates (contract-owned)
 # ---------------------------------------------------------------------------
@@ -358,12 +387,13 @@ class EdgeFlow(gl.Contract):
         return f"{owner}|{int(i)}"
 
     def _now(self) -> int:
-        # Deterministic per-transaction timestamp from the message datetime.
-        try:
-            import datetime as _dt
-            return int(_dt.datetime.now(_dt.timezone.utc).timestamp())
-        except Exception:
-            return int(gl.message.timestamp)  # test-shim fallback
+        # Consensus time for this transaction, taken from the raw message
+        # GenVM hands every validator. All of them see the same string, so
+        # lifecycle math is deterministic.
+        #
+        # Deliberately not the node wall clock: that varies per validator
+        # and would make them disagree on phase boundaries.
+        return _parse_iso_utc(str(gl.message_raw["datetime"]))
 
     def _visible_phase(self, m: MarketRecord, now: int) -> str:
         if m.state == STATE_UP:
@@ -447,27 +477,32 @@ class EdgeFlow(gl.Contract):
         if pkey not in self.positions:
             if value > MAX_STAKE:
                 raise Exception(f"{ERR_EXPECTED}: stake above maximum")
-            self.positions[pkey] = PositionRecord(
+            pos = PositionRecord(
                 market_id=u256(mid),
                 owner=owner,
                 side=side,
                 stake=u256(value),
                 claimed=False,
             )
+            self.positions[pkey] = pos
             self._register_user_market(owner, mid)
         else:
-            existing = self.positions[pkey]
-            if existing.side != side:
+            pos = self.positions[pkey]
+            if pos.side != side:
                 raise Exception(f"{ERR_EXPECTED}: side switch not allowed")
-            new_stake = int(existing.stake) + value
+            new_stake = int(pos.stake) + value
             if new_stake > MAX_STAKE:
                 raise Exception(f"{ERR_EXPECTED}: stake above maximum")
-            existing.stake = u256(new_stake)
+            pos.stake = u256(new_stake)
+            # Explicit write-back: don't rely on the storage proxy
+            # persisting in-place field mutations.
+            self.positions[pkey] = pos
 
         if side == SIDE_UP:
             m.up_pool = u256(int(m.up_pool) + value)
         else:
             m.down_pool = u256(int(m.down_pool) + value)
+        self.markets[u256(mid)] = m
 
     # ---- resolve ---------------------------------------------------------
 
@@ -488,9 +523,23 @@ class EdgeFlow(gl.Contract):
         cm_url = _coinmarket_url(asset, day_start)
         gt_url = _gate_url(asset, day_start)
 
+        slug = COINMARKET_SLUGS[asset]
+        pair = GATE_PAIRS[asset]
+        target_day = m.target_day
+
+        # Validators re-run this and compare the returned string. It binds
+        # only NORMALIZED fields — market id, asset, slug, pair, target day
+        # and the two derived directions plus the final result. Raw prices
+        # are deliberately NOT part of the consensus key: two validators
+        # polling CoinGecko seconds apart routinely see slightly different
+        # sample points, and failing consensus over that would block
+        # settlement even when both sources plainly agree on direction.
         try:
-            evidence_str = gl.eq_principle.strict_eq(
-                lambda: _fetch_and_normalize(cm_url, gt_url, day_start)
+            agreed = gl.eq_principle.strict_eq(
+                lambda: _normalized_evidence(
+                    mid, asset, slug, pair, target_day,
+                    cm_url, gt_url, day_start,
+                )
             )
         except Exception as e:
             msg = str(e)
@@ -500,16 +549,21 @@ class EdgeFlow(gl.Contract):
                 return self._finalize_terminal_refund(m, now)
             raise
 
-        parts = evidence_str.split("|")
-        # cm_open|cm_close|gt_open|gt_close
-        cm_open = int(parts[0])
-        cm_close = int(parts[1])
-        gt_open = int(parts[2])
-        gt_close = int(parts[3])
+        cm_dir, gt_dir, final = _parse_agreed(agreed, mid, asset, slug,
+                                              pair, target_day)
 
-        cm_dir = _direction(cm_open, cm_close)
-        gt_dir = _direction(gt_open, gt_close)
-        final = cm_dir if cm_dir == gt_dir else PHASE_INCONCLUSIVE
+        # A single source may never produce a direction.
+        if final in (SIDE_UP, SIDE_DOWN) and cm_dir != gt_dir:
+            raise Exception(f"{ERR_INVARIANT}: directional result without 2-of-2")
+
+        # Prices are stored as evidence only, sampled by this node after
+        # the direction has already been agreed. They are informational.
+        cm_open, cm_close, gt_open, gt_close = 0, 0, 0, 0
+        try:
+            cm_open, cm_close = _fetch_and_parse_coinmarket(cm_url, day_start)
+            gt_open, gt_close = _fetch_and_parse_gate(gt_url, day_start)
+        except Exception:
+            pass  # evidence prices are best-effort; direction already agreed
 
         self.settlement_evidence[u256(mid)] = SettlementEvidence(
             market_id=u256(mid),
@@ -539,6 +593,7 @@ class EdgeFlow(gl.Contract):
             final in (SIDE_UP, SIDE_DOWN) and winner_pool == 0
         )
         m.resolved_at = u256(now)
+        self.markets[u256(mid)] = m
         return final
 
     def _finalize_terminal_refund(self, m: MarketRecord, now: int) -> str:
@@ -559,6 +614,7 @@ class EdgeFlow(gl.Contract):
         m.result = PHASE_INCONCLUSIVE
         m.refund_all = True
         m.resolved_at = u256(now)
+        self.markets[u256(mid)] = m
         return PHASE_INCONCLUSIVE
 
     # ---- claim -----------------------------------------------------------
@@ -587,8 +643,12 @@ class EdgeFlow(gl.Contract):
         if int(m.paid_out) + payout > total_pool:
             raise Exception(f"{ERR_INVARIANT}: payout exceeds pool")
 
+        # Mark claimed and debit the pool BEFORE transferring, and write
+        # both records back explicitly.
         pos.claimed = True
+        self.positions[pkey] = pos
         m.paid_out = u256(int(m.paid_out) + payout)
+        self.markets[u256(mid)] = m
 
         # Native GEN transfer to the caller.
         self._pay(gl.message.sender_address, payout)
@@ -794,15 +854,70 @@ class EdgeFlow(gl.Contract):
 
 
 # ---------------------------------------------------------------------------
-# Nondet worker (must be a plain function referenced from inside the
-# equivalence-principle block). Returns a compact pipe-delimited string of
-# scaled integers so validators compare a normalized shape, not raw JSON.
+# Nondet worker. Runs on the leader and is re-run by every validator inside
+# gl.eq_principle.strict_eq, which compares the returned strings verbatim.
+#
+# The string binds ONLY normalized fields:
+#   market_id | asset | coinmarket_slug | gate_pair | target_day
+#            | coinmarket_direction | gate_direction | final_result
+#
+# Raw open/close prices are excluded on purpose. Validators poll the
+# public feeds at slightly different moments and legitimately observe
+# different sample points; making prices part of the consensus key would
+# stall settlement even when both sources clearly agree on direction.
+# Directions are the semantic result, so that is what must match.
 # ---------------------------------------------------------------------------
 
-def _fetch_and_normalize(cm_url: str, gt_url: str, day_start: int) -> str:
+EVIDENCE_FIELD_COUNT = 8
+
+
+def _normalized_evidence(
+    market_id: int,
+    asset: str,
+    slug: str,
+    pair: str,
+    target_day: str,
+    cm_url: str,
+    gt_url: str,
+    day_start: int,
+) -> str:
     cm_open, cm_close = _fetch_and_parse_coinmarket(cm_url, day_start)
     gt_open, gt_close = _fetch_and_parse_gate(gt_url, day_start)
-    return f"{cm_open}|{cm_close}|{gt_open}|{gt_close}"
+    cm_dir = _direction(cm_open, cm_close)
+    gt_dir = _direction(gt_open, gt_close)
+    final = cm_dir if cm_dir == gt_dir else PHASE_INCONCLUSIVE
+    return "|".join([
+        str(int(market_id)), asset, slug, pair, target_day,
+        cm_dir, gt_dir, final,
+    ])
+
+
+def _parse_agreed(
+    agreed: str,
+    market_id: int,
+    asset: str,
+    slug: str,
+    pair: str,
+    target_day: str,
+):
+    """Split the agreed evidence string and verify every bound field."""
+    parts = agreed.split("|")
+    if len(parts) != EVIDENCE_FIELD_COUNT:
+        raise Exception(f"{ERR_INVARIANT}: malformed agreed evidence")
+    if (
+        parts[0] != str(int(market_id))
+        or parts[1] != asset
+        or parts[2] != slug
+        or parts[3] != pair
+        or parts[4] != target_day
+    ):
+        raise Exception(f"{ERR_INVARIANT}: agreed evidence bound to wrong market")
+    cm_dir, gt_dir, final = parts[5], parts[6], parts[7]
+    if cm_dir not in (SIDE_UP, SIDE_DOWN) or gt_dir not in (SIDE_UP, SIDE_DOWN):
+        raise Exception(f"{ERR_INVARIANT}: agreed evidence has bad direction")
+    if final not in (SIDE_UP, SIDE_DOWN, PHASE_INCONCLUSIVE):
+        raise Exception(f"{ERR_INVARIANT}: agreed evidence has bad result")
+    return cm_dir, gt_dir, final
 
 
 def _fetch_and_parse_coinmarket(url: str, day_start: int):

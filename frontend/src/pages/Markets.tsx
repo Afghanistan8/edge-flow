@@ -69,7 +69,7 @@ export function MarketsPage() {
         </div>
         <p className="mt-2 text-sm text-[var(--ef-ink-dim)] max-w-2xl">
           Predict whether JUP, ZAMA, ATOM or ZRO closes up or down on the GMT+1
-          daily candle. Stake 2–8 GEN. Settlement needs Coinmarket and Gate.io
+          daily candle. Stake 2–8 GEN. Settlement needs CoinGecko and Gate.io
           to agree — no admin, no single feed.
         </p>
       </div>

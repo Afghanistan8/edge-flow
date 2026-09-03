@@ -7,7 +7,7 @@ regardless of which subdirectory (direct/ or consensus/) collects.
 
 from __future__ import annotations
 
-import datetime as _dt
+
 import json
 import sys
 import types
@@ -60,6 +60,13 @@ class _Address(str):
         ledger[str(self).lower()] += int(amount)
 
 
+def _iso_utc(ts: int) -> str:
+    """Render unix seconds the way GenVM fills message_raw['datetime']."""
+    import time
+    y, mo, d, hh, mi, sec = time.gmtime(int(ts))[:6]
+    return f"{y:04d}-{mo:02d}-{d:02d}T{hh:02d}:{mi:02d}:{sec:02d}Z"
+
+
 class _Message:
     def __init__(self):
         self.sender_address = _Address(
@@ -68,7 +75,11 @@ class _Message:
         self.contract_address = _Address(
             "0x0000000000000000000000000000000000000001"
         )
+        self.origin_address = self.sender_address
         self.value = 0
+        # Tests warp time by setting .timestamp; the contract reads the
+        # consensus time through gl.message_raw["datetime"], exactly as
+        # it does on-chain.
         self.timestamp = 0
 
 
@@ -164,6 +175,18 @@ class _GL:
             UserError=Exception,
         )
 
+    @property
+    def message_raw(self):
+        m = self.message
+        return {
+            "contract_address": m.contract_address,
+            "sender_address": m.sender_address,
+            "origin_address": m.sender_address,
+            "stack": [],
+            "value": m.value,
+            "datetime": _iso_utc(m.timestamp),
+        }
+
     def get_contract_at(self, addr):
         return _ContractProxy(addr)
 
@@ -209,26 +232,10 @@ sys.modules["genlayer"] = genlayer_pkg
 sys.modules["genlayer.types"] = types_mod
 
 
-# ---------------------------------------------------------------------------
-# datetime.now() patch so contract code that uses it sees the warped clock
-# ---------------------------------------------------------------------------
-
-_real_datetime = _dt.datetime
-
-
-class _WarpedDatetime(_real_datetime):
-    @classmethod
-    def now(cls, tz=None):
-        ts = gl.message.timestamp
-        if not ts:
-            return _real_datetime.now(tz)
-        d = _real_datetime.fromtimestamp(int(ts), _dt.timezone.utc)
-        if tz is not None:
-            return d.astimezone(tz)
-        return d.replace(tzinfo=None)
-
-
-_dt.datetime = _WarpedDatetime  # type: ignore
+# NOTE: the contract reads time exclusively from gl.message.timestamp (the
+# consensus timestamp), so tests warp time by setting that field. There is
+# deliberately no datetime monkeypatch here — if one were needed, it would
+# mean the contract had reintroduced a nondeterministic wall-clock read.
 
 
 # ---------------------------------------------------------------------------

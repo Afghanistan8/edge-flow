@@ -24,7 +24,7 @@ const rootRoute = createRootRoute({
       <footer className="mt-16 border-t border-[var(--ef-edge)]">
         <div className="max-w-6xl mx-auto px-5 py-6 text-xs text-[var(--ef-ink-dim)] flex flex-wrap items-center gap-3 justify-between">
           <span className="ef-mono">
-            edge·flow · Bradbury testnet · GMT+1 candle · Coinmarket + Gate.io
+            edge·flow · Bradbury testnet · GMT+1 candle · CoinGecko + Gate.io
           </span>
           <span>Contract is source of truth.</span>
         </div>

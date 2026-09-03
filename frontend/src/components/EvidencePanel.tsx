@@ -30,7 +30,7 @@ export function EvidencePanel({
           Terminal refund
         </div>
         <p className="text-[var(--ef-ink-dim)]">
-          No Coinmarket + Gate.io evidence became verifiable within{" "}
+          No CoinGecko + Gate.io evidence became verifiable within{" "}
           {formatGmt1(market.terminalRefundAt)}. Original stakes are refundable.
           No source direction was fabricated.
         </p>
@@ -44,7 +44,7 @@ export function EvidencePanel({
       </div>
       <div className="grid sm:grid-cols-2 gap-4">
         <SourceRow
-          name="Coinmarket"
+          name="CoinGecko"
           open={evidence.coinmarketOpen}
           close={evidence.coinmarketClose}
           dir={evidence.coinmarketDirection}
