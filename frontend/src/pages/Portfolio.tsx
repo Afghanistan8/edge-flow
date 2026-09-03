@@ -1,21 +1,16 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useAccount } from "wagmi";
-import { useClaim, useUserMarkets } from "@/lib/hooks";
+import { useUserMarkets } from "@/lib/hooks";
 import { formatGen } from "@/lib/format";
 import { MarketCard } from "@/components/MarketCard";
-import { TxDialog, type TxStage } from "@/components/TxDialog";
 import { Link } from "@tanstack/react-router";
 import type { Market } from "@/lib/contract";
 
 export function PortfolioPage() {
   const { address, isConnected } = useAccount();
   const { data: markets, isLoading } = useUserMarkets(address);
-  const claim = useClaim();
-  const [stage, setStage] = useState<TxStage | null>(null);
-  const [err, setErr] = useState<string | undefined>();
 
   const grouped = useMemo(() => {
-    const claimable: Market[] = [];
     const pending: Market[] = [];
     const settled: Market[] = [];
     for (const m of markets ?? []) {
@@ -23,9 +18,9 @@ export function PortfolioPage() {
       else if (m.state === "REFUNDED" || m.result) settled.push(m);
       else pending.push(m);
     }
-    // Splitting claimable requires the position — for cards we lean on the
-    // detail page's claim button.
-    return { claimable, pending, settled };
+    // The per-market claim button lives on the detail page, which has
+    // the per-wallet claimable amount from the contract.
+    return { pending, settled };
   }, [markets]);
 
   if (!isConnected) {
@@ -66,17 +61,6 @@ export function PortfolioPage() {
 
       <Group title="Pending" rows={grouped.pending} />
       <Group title="Settled" rows={grouped.settled} />
-
-      <TxDialog
-        open={stage !== null}
-        stage={stage ?? "review"}
-        error={err}
-        onClose={() => {
-          setStage(null);
-          setErr(undefined);
-          claim.reset();
-        }}
-      />
     </div>
   );
 }
