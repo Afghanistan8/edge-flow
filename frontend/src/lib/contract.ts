@@ -215,23 +215,34 @@ export async function getSettlementEvidence(
 }
 
 // ------------------- writes -------------------
+//
+// All writes require the caller to pass the connected wallet address so
+// genlayer-js can route signing through the injected wallet.
 
-export function createMarketTx(asset: Asset, targetDay: string) {
-  return writeContract("create_market", [asset, targetDay]);
+export function createMarketTx(
+  account: string,
+  asset: Asset,
+  targetDay: string,
+) {
+  return writeContract("create_market", [asset, targetDay], { account });
 }
 
 export function takePositionTx(
+  account: string,
   marketId: number,
   side: "UP" | "DOWN",
   stakeWei: bigint,
 ) {
-  return writeContract("take_position", [marketId, side], { value: stakeWei });
+  return writeContract("take_position", [marketId, side], {
+    account,
+    value: stakeWei,
+  });
 }
 
-export function resolveMarketTx(marketId: number) {
-  return writeContract("resolve_market", [marketId]);
+export function resolveMarketTx(account: string, marketId: number) {
+  return writeContract("resolve_market", [marketId], { account });
 }
 
-export function claimTx(marketId: number) {
-  return writeContract("claim", [marketId]);
+export function claimTx(account: string, marketId: number) {
+  return writeContract("claim", [marketId], { account });
 }

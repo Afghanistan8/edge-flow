@@ -1,8 +1,10 @@
-// Thin wrapper around genlayer-js against GenLayer Bradbury.
+// genlayer-js wrapper against GenLayer Bradbury.
 //
-// genlayer-js ships chain configs for localnet and testnetAsimov only, so
-// we clone testnetAsimov (same chain id 4221) and override the RPC and
-// the Bradbury consensus contract addresses.
+// Reads go through a bare client (HTTP RPC). Writes need a connected
+// wallet, so we build a per-call client with the wallet address; when
+// `account` is a plain string, genlayer-js routes signing methods to
+// window.ethereum (the injected wallet). This is the pattern the SDK
+// exposes for browser wallets.
 
 import { CONTRACT_ADDRESS, RPC_URL } from "./config";
 import { createClient, chains } from "genlayer-js";
@@ -38,16 +40,25 @@ function bradburyChain() {
   };
 }
 
-let cachedClient: AnyClient | null = null;
+let readClient: AnyClient | null = null;
 
 export function isConfigured(): boolean {
   return CONTRACT_ADDRESS.startsWith("0x") && CONTRACT_ADDRESS.length === 42;
 }
 
-function client(): AnyClient {
-  if (cachedClient) return cachedClient;
-  cachedClient = createClient({ chain: bradburyChain() });
-  return cachedClient;
+function getReadClient(): AnyClient {
+  if (readClient) return readClient;
+  readClient = createClient({ chain: bradburyChain() });
+  return readClient;
+}
+
+function getWriteClient(address: string): AnyClient {
+  // Pass account as a plain address string so genlayer-js routes signing
+  // methods (eth_sendTransaction, personal_sign, etc.) to window.ethereum.
+  return createClient({
+    chain: bradburyChain(),
+    account: address as `0x${string}`,
+  });
 }
 
 export async function readContract<T = unknown>(
@@ -55,7 +66,7 @@ export async function readContract<T = unknown>(
   args: unknown[] = [],
 ): Promise<T> {
   if (!isConfigured()) throw new Error("Edge-Flow contract not configured");
-  return (await client().readContract({
+  return (await getReadClient().readContract({
     address: CONTRACT_ADDRESS,
     functionName: method,
     args,
@@ -65,9 +76,14 @@ export async function readContract<T = unknown>(
 export async function writeContract(
   method: string,
   args: unknown[] = [],
-  opts: { value?: bigint } = {},
+  opts: { value?: bigint; account?: string } = {},
 ): Promise<string> {
-  return (await client().writeContract({
+  if (!isConfigured()) throw new Error("Edge-Flow contract not configured");
+  if (!opts.account) {
+    throw new Error("Connect a wallet before sending a transaction");
+  }
+  const client = getWriteClient(opts.account);
+  return (await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: method,
     args,

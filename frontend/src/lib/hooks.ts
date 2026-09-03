@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useAccount } from "wagmi";
 import type { Asset } from "./config";
 import {
   claimTx,
@@ -15,6 +16,11 @@ import {
   takePositionTx,
 } from "./contract";
 import { isConfigured } from "./genlayer";
+
+function requireAccount(address?: string): string {
+  if (!address) throw new Error("Connect a wallet before sending a transaction");
+  return address;
+}
 
 const enabled = () => isConfigured();
 
@@ -94,9 +100,10 @@ export function useUserMarkets(wallet: string | undefined) {
 
 export function useCreateMarket() {
   const qc = useQueryClient();
+  const { address } = useAccount();
   return useMutation({
     mutationFn: ({ asset, day }: { asset: Asset; day: string }) =>
-      createMarketTx(asset, day),
+      createMarketTx(requireAccount(address), asset, day),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["markets"] });
       qc.invalidateQueries({ queryKey: ["open-markets"] });
@@ -106,6 +113,7 @@ export function useCreateMarket() {
 
 export function useTakePosition() {
   const qc = useQueryClient();
+  const { address } = useAccount();
   return useMutation({
     mutationFn: ({
       marketId,
@@ -115,7 +123,7 @@ export function useTakePosition() {
       marketId: number;
       side: "UP" | "DOWN";
       stakeWei: bigint;
-    }) => takePositionTx(marketId, side, stakeWei),
+    }) => takePositionTx(requireAccount(address), marketId, side, stakeWei),
     onSuccess: (_r, vars) => {
       qc.invalidateQueries({ queryKey: ["market", vars.marketId] });
       qc.invalidateQueries({ queryKey: ["markets"] });
@@ -126,8 +134,10 @@ export function useTakePosition() {
 
 export function useResolve() {
   const qc = useQueryClient();
+  const { address } = useAccount();
   return useMutation({
-    mutationFn: (marketId: number) => resolveMarketTx(marketId),
+    mutationFn: (marketId: number) =>
+      resolveMarketTx(requireAccount(address), marketId),
     onSuccess: (_r, marketId) => {
       qc.invalidateQueries({ queryKey: ["market", marketId] });
       qc.invalidateQueries({ queryKey: ["evidence", marketId] });
@@ -137,8 +147,10 @@ export function useResolve() {
 
 export function useClaim() {
   const qc = useQueryClient();
+  const { address } = useAccount();
   return useMutation({
-    mutationFn: (marketId: number) => claimTx(marketId),
+    mutationFn: (marketId: number) =>
+      claimTx(requireAccount(address), marketId),
     onSuccess: (_r, marketId) => {
       qc.invalidateQueries({ queryKey: ["market", marketId] });
       qc.invalidateQueries({ queryKey: ["claimable", marketId] });
