@@ -1,0 +1,5 @@
+# Runtime dependencies for the contract's operational scripts.
+# The GenVM contract itself pulls its SDK from the GenLayer release
+# archive via gltest and does not need to install anything here.
+
+# scripts/check_sources.py uses only stdlib. Kept for future extensions.
