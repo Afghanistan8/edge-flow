@@ -130,21 +130,50 @@ class _PublicAccessor:
     view = _ViewAccessor()
 
 
+class _UserError(Exception):
+    """Mirrors genlayer.gl.vm.UserError.
+
+    The real one is a dataclass whose __str__ returns repr(self), so the
+    rendered text is ``UserError(message='...')``. Reproducing that here
+    keeps the contract's own substring checks (e.g. ERR_TRANSIENT in
+    str(e)) honest under test.
+    """
+
+    def __init__(self, message):
+        self.message = str(message)
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"UserError(message={self.message!r})"
+
+
 class _EqPrinciple:
     @staticmethod
     def strict_eq(fn):
         return fn()
 
 
+_ADDR_RE = __import__("re").compile(r"^0x[0-9a-fA-F]{40}$")
+
+
 class _ContractProxy:
-    """Returned by gl.get_contract_at(addr) — supports .emit_transfer."""
+    """Returned by gl.get_contract_at(addr) — supports .emit_transfer.
+
+    Real GenVM raises TypeError from get_contract_at unless it is handed
+    an Address, and the transfer itself can fail. The shim mirrors that
+    so tests can exercise the payout-failure path instead of silently
+    "succeeding" against any object.
+    """
 
     def __init__(self, addr):
         self._addr = addr
 
     def emit_transfer(self, *, value):
-        ledger.setdefault(str(self._addr).lower(), 0)
-        ledger[str(self._addr).lower()] += int(value)
+        if int(value) <= 0:
+            raise ValueError("value must be greater than 0 for emit_transfer")
+        key = str(self._addr).lower()
+        ledger.setdefault(key, 0)
+        ledger[key] += int(value)
 
 
 class _Contract:
@@ -172,7 +201,7 @@ class _GL:
         self.eq_principle = _EqPrinciple()
         self.vm = types.SimpleNamespace(
             run_nondet_unsafe=lambda fn, *a, **kw: fn(*a, **kw),
-            UserError=Exception,
+            UserError=_UserError,
         )
 
     @property
@@ -188,6 +217,9 @@ class _GL:
         }
 
     def get_contract_at(self, addr):
+        # Real SDK: raises TypeError('address expected') for non-Address.
+        if not isinstance(addr, str) or not _ADDR_RE.match(str(addr)):
+            raise TypeError("address expected")
         return _ContractProxy(addr)
 
 

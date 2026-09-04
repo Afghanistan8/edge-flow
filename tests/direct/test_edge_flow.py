@@ -770,93 +770,263 @@ def test_terminal_refund_persists_state(gl_env, contract):
 
 
 # =============================================================================
-# normalized consensus payload
+# consensus payload - every persisted evidence field comes from the agreed
+# string, so validators cannot write divergent evidence
 # =============================================================================
 
-def test_normalized_evidence_excludes_raw_prices(gl_env, contract):
-    """The consensus key must bind ids/directions, never raw prices."""
-    from contracts.EdgeFlow import _normalized_evidence, _coinmarket_url, _gate_url
+def _payload(gl_env, cm=(1.0, 1.2), gt=(1.0, 1.3), mid=1, asset="JUP",
+             slug="jupiter-exchange-solana", pair="JUP_USDT"):
+    from contracts.EdgeFlow import (
+        _normalized_evidence, _coinmarket_url, _gate_url,
+    )
+    gl_env.set_nondet(make_nondet({
+        "coingecko.com": full_coinmarket(DAY_START_UTC, *cm),
+        "gateio.ws": full_gate(DAY_START_UTC, *gt),
+    }))
+    return _normalized_evidence(
+        mid, asset, slug, pair, TARGET_DAY,
+        _coinmarket_url(asset, DAY_START_UTC),
+        _gate_url(asset, DAY_START_UTC),
+        DAY_START_UTC,
+    )
 
+
+def test_agreed_payload_carries_prices_and_directions(gl_env, contract):
+    """The consensus string must contain open/close for BOTH sources, not
+    just directions. Otherwise prices would have to be re-fetched after
+    consensus, which lets validators persist divergent evidence."""
+    from contracts.EdgeFlow import EVIDENCE_FIELD_COUNT
+
+    parts = _payload(gl_env).split("|")
+    assert len(parts) == EVIDENCE_FIELD_COUNT == 12
+    assert parts[0:5] == [
+        "1", "JUP", "jupiter-exchange-solana", "JUP_USDT", TARGET_DAY,
+    ]
+    cm_open, cm_close, cm_dir = parts[5], parts[6], parts[7]
+    gt_open, gt_close, gt_dir = parts[8], parts[9], parts[10]
+    assert cm_open.isdigit() and cm_close.isdigit()
+    assert gt_open.isdigit() and gt_close.isdigit()
+    assert int(cm_close) > int(cm_open)
+    assert int(gt_close) > int(gt_open)
+    assert (cm_dir, gt_dir, parts[11]) == ("UP", "UP", "UP")
+
+
+def test_stored_evidence_equals_agreed_payload(gl_env, contract):
+    """Evidence in storage must match the consensus payload exactly."""
+    from contracts.EdgeFlow import _parse_agreed
+
+    mid = _open_market_with_stakes(gl_env, contract)
+    agreed = _payload(gl_env, mid=mid)
+    (cm_o, cm_c, cm_d, gt_o, gt_c, gt_d, final) = _parse_agreed(
+        agreed, mid, "JUP", "jupiter-exchange-solana", "JUP_USDT", TARGET_DAY,
+    )
+
+    gl_env.set_time(SETTLES_AT + 60)
     gl_env.set_nondet(make_nondet({
         "coingecko.com": full_coinmarket(DAY_START_UTC, 1.0, 1.2),
         "gateio.ws": full_gate(DAY_START_UTC, 1.0, 1.3),
     }))
-    payload = _normalized_evidence(
-        1, "JUP", "jupiter-exchange-solana", "JUP_USDT", TARGET_DAY,
-        _coinmarket_url("JUP", DAY_START_UTC),
-        _gate_url("JUP", DAY_START_UTC),
-        DAY_START_UTC,
-    )
-    parts = payload.split("|")
-    assert parts == [
-        "1", "JUP", "jupiter-exchange-solana", "JUP_USDT", TARGET_DAY,
-        "UP", "UP", "UP",
-    ]
-    # scaled integer prices must not appear anywhere in the payload
-    assert "100000000" not in payload
+    contract.resolve_market(gl_env.u256(mid))
+
+    ev = contract.get_settlement_evidence(gl_env.u256(mid))
+    assert ev["coinmarket_open"] == cm_o
+    assert ev["coinmarket_close"] == cm_c
+    assert ev["coinmarket_direction"] == cm_d
+    assert ev["gate_open"] == gt_o
+    assert ev["gate_close"] == gt_c
+    assert ev["gate_direction"] == gt_d
+    assert ev["final_result"] == final
+    assert ev["terminal_refund"] is False
 
 
-def test_normalized_evidence_stable_across_price_jitter(gl_env, contract):
-    """Two validators seeing different sample points but the same direction
-    must produce identical consensus payloads."""
-    from contracts.EdgeFlow import _normalized_evidence, _coinmarket_url, _gate_url
+def test_resolve_performs_no_web_fetch_after_consensus(gl_env, contract):
+    """If resolve_market fetched again after the equivalence block, a feed
+    dying mid-transaction would change or blank the stored evidence. Kill
+    the feed the moment consensus returns; evidence must still be fully
+    populated from the agreed payload."""
+    mid = _open_market_with_stakes(gl_env, contract)
+    gl_env.set_time(SETTLES_AT + 60)
 
-    def payload_for(cm_open, cm_close, gt_open, gt_close):
-        gl_env.set_nondet(make_nondet({
-            "coingecko.com": full_coinmarket(DAY_START_UTC, cm_open, cm_close),
-            "gateio.ws": full_gate(DAY_START_UTC, gt_open, gt_close),
-        }))
-        return _normalized_evidence(
-            7, "ATOM", "cosmos", "ATOM_USDT", TARGET_DAY,
-            _coinmarket_url("ATOM", DAY_START_UTC),
-            _gate_url("ATOM", DAY_START_UTC),
-            DAY_START_UTC,
-        )
+    calls = {"n": 0}
+    good = make_nondet({
+        "coingecko.com": full_coinmarket(DAY_START_UTC, 1.0, 1.2),
+        "gateio.ws": full_gate(DAY_START_UTC, 1.0, 1.3),
+    })
 
-    a = payload_for(7.50, 7.91, 7.52, 7.88)
-    b = payload_for(7.5013, 7.9042, 7.5188, 7.8811)
-    assert a == b  # different prices, same directions -> consensus holds
+    def one_shot(url):
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise RuntimeError("post-consensus fetch attempted")
+        return good(url)
+
+    gl_env.set_nondet(one_shot)
+    assert contract.resolve_market(gl_env.u256(mid)) == "UP"
+    assert calls["n"] == 2, f"expected exactly 2 fetches, saw {calls['n']}"
+
+    ev = contract.get_settlement_evidence(gl_env.u256(mid))
+    assert ev["coinmarket_open"] > 0 and ev["coinmarket_close"] > 0
+    assert ev["gate_open"] > 0 and ev["gate_close"] > 0
+
+
+def test_disagreement_stores_agreed_prices_and_refunds(gl_env, contract):
+    mid = _open_market_with_stakes(gl_env, contract, up=3 * GEN, down=5 * GEN)
+    gl_env.set_time(SETTLES_AT + 60)
+    gl_env.set_nondet(make_nondet({
+        "coingecko.com": full_coinmarket(DAY_START_UTC, 1.0, 1.2),
+        "gateio.ws": full_gate(DAY_START_UTC, 1.3, 1.0),
+    }))
+    assert contract.resolve_market(gl_env.u256(mid)) == "INCONCLUSIVE"
+
+    ev = contract.get_settlement_evidence(gl_env.u256(mid))
+    assert ev["coinmarket_direction"] == "UP"
+    assert ev["gate_direction"] == "DOWN"
+    assert ev["final_result"] == "INCONCLUSIVE"
+    assert ev["terminal_refund"] is False
+    assert ev["coinmarket_open"] > 0 and ev["gate_open"] > 0
+    assert contract.get_market(gl_env.u256(mid))["refund_all"] is True
+
+
+def test_terminal_refund_stores_no_fabricated_prices(gl_env, contract):
+    mid = _open_market_with_stakes(gl_env, contract)
+
+    def outage(url):
+        raise RuntimeError("upstream down")
+
+    gl_env.set_time(REFUND_AT)
+    gl_env.set_sender(CARL, 0)
+    gl_env.set_nondet(outage)
+    contract.resolve_market(gl_env.u256(mid))
+
+    ev = contract.get_settlement_evidence(gl_env.u256(mid))
+    assert ev["terminal_refund"] is True
+    assert ev["coinmarket_open"] == 0 and ev["coinmarket_close"] == 0
+    assert ev["gate_open"] == 0 and ev["gate_close"] == 0
+    assert ev["coinmarket_direction"] == ""
+    assert ev["gate_direction"] == ""
 
 
 def test_parse_agreed_rejects_wrong_market_binding(gl_env, contract):
     from contracts.EdgeFlow import _parse_agreed
 
-    good = "1|JUP|jupiter-exchange-solana|JUP_USDT|2026-09-04|UP|UP|UP"
-    assert _parse_agreed(
-        good, 1, "JUP", "jupiter-exchange-solana", "JUP_USDT", "2026-09-04"
-    ) == ("UP", "UP", "UP")
+    good = _payload(gl_env)
+    args = ("jupiter-exchange-solana", "JUP_USDT", TARGET_DAY)
+    assert _parse_agreed(good, 1, "JUP", *args)[6] == "UP"
 
-    # same payload, different market id -> rejected
     with pytest.raises(Exception, match="INVARIANT"):
-        _parse_agreed(
-            good, 2, "JUP", "jupiter-exchange-solana", "JUP_USDT", "2026-09-04"
-        )
-    # swapped asset -> rejected
+        _parse_agreed(good, 2, "JUP", *args)
     with pytest.raises(Exception, match="INVARIANT"):
-        _parse_agreed(
-            good, 1, "ATOM", "jupiter-exchange-solana", "JUP_USDT", "2026-09-04"
-        )
-    # truncated payload -> rejected
+        _parse_agreed(good, 1, "ATOM", *args)
     with pytest.raises(Exception, match="INVARIANT"):
-        _parse_agreed(
-            "1|JUP|UP", 1, "JUP", "jupiter-exchange-solana", "JUP_USDT",
-            "2026-09-04",
-        )
+        _parse_agreed(good, 1, "JUP", "jupiter-exchange-solana",
+                      "ATOM_USDT", TARGET_DAY)
+    with pytest.raises(Exception, match="INVARIANT"):
+        _parse_agreed("1|JUP|UP", 1, "JUP", *args)
+
+
+def test_parse_agreed_rejects_tampered_fields(gl_env, contract):
+    """Directions and the final result must follow from the agreed prices."""
+    from contracts.EdgeFlow import _parse_agreed
+
+    args = (1, "JUP", "jupiter-exchange-solana", "JUP_USDT", TARGET_DAY)
+    parts = _payload(gl_env).split("|")
+
+    flipped = list(parts)
+    flipped[7] = "DOWN"
+    with pytest.raises(Exception, match="INVARIANT"):
+        _parse_agreed("|".join(flipped), *args)
+
+    forced = list(parts)
+    forced[10] = "DOWN"
+    forced[11] = "UP"
+    with pytest.raises(Exception, match="INVARIANT"):
+        _parse_agreed("|".join(forced), *args)
+
+    zeroed = list(parts)
+    zeroed[5] = "0"
+    with pytest.raises(Exception, match="INVARIANT"):
+        _parse_agreed("|".join(zeroed), *args)
+
+    nonnum = list(parts)
+    nonnum[6] = "1.25"
+    with pytest.raises(Exception, match="INVARIANT"):
+        _parse_agreed("|".join(nonnum), *args)
 
 
 def test_single_source_can_never_produce_direction(gl_env, contract):
-    """2-of-2 is structural: a disagreement can only ever yield
-    INCONCLUSIVE, never UP or DOWN."""
-    from contracts.EdgeFlow import _normalized_evidence, _coinmarket_url, _gate_url
-
-    gl_env.set_nondet(make_nondet({
-        "coingecko.com": full_coinmarket(DAY_START_UTC, 1.0, 1.4),  # UP
-        "gateio.ws": full_gate(DAY_START_UTC, 1.4, 1.0),           # DOWN
-    }))
-    payload = _normalized_evidence(
-        3, "ZRO", "layerzero", "ZRO_USDT", TARGET_DAY,
-        _coinmarket_url("ZRO", DAY_START_UTC),
-        _gate_url("ZRO", DAY_START_UTC),
-        DAY_START_UTC,
-    )
+    payload = _payload(gl_env, cm=(1.0, 1.4), gt=(1.4, 1.0),
+                       mid=3, asset="ZRO", slug="layerzero", pair="ZRO_USDT")
     assert payload.split("|")[-1] == "INCONCLUSIVE"
+
+
+# =============================================================================
+# claim: payout failure must revert so the claim stays retryable
+# =============================================================================
+
+def _settled_up_market(gl_env, contract):
+    mid = _open_market_with_stakes(gl_env, contract, up=5 * GEN, down=3 * GEN)
+    gl_env.set_time(SETTLES_AT + 60)
+    gl_env.set_nondet(make_nondet({
+        "coingecko.com": full_coinmarket(DAY_START_UTC, 1.0, 1.2),
+        "gateio.ws": full_gate(DAY_START_UTC, 1.0, 1.3),
+    }))
+    contract.resolve_market(gl_env.u256(mid))
+    return mid
+
+
+def test_failed_payout_leaves_claim_retryable(gl_env, contract):
+    """If the transfer fails the whole claim must revert: claimed stays
+    False, paid_out unchanged, and a later claim succeeds."""
+    mid = _settled_up_market(gl_env, contract)
+    before = contract.get_market(gl_env.u256(mid))["paid_out"]
+
+    import contracts.EdgeFlow as EF
+    original = EF.EdgeFlow._pay
+
+    def broken(self, to, amount):
+        raise Exception("TRANSIENT: payout failed: transfer rejected")
+
+    EF.EdgeFlow._pay = broken
+    try:
+        gl_env.set_sender(ALICE, 0)
+        with pytest.raises(Exception, match="payout failed"):
+            contract.claim(gl_env.u256(mid))
+    finally:
+        EF.EdgeFlow._pay = original
+
+    pos = contract.get_position(gl_env.u256(mid), gl_env.Address(ALICE))
+    assert pos["claimed"] is False, "failed payout must not consume the claim"
+    assert contract.get_market(gl_env.u256(mid))["paid_out"] == before
+    assert contract.get_claimable(
+        gl_env.u256(mid), gl_env.Address(ALICE)
+    ) == 8 * GEN
+
+    gl_env.set_sender(ALICE, 0)
+    assert int(contract.claim(gl_env.u256(mid))) == 8 * GEN
+    assert contract.get_position(
+        gl_env.u256(mid), gl_env.Address(ALICE)
+    )["claimed"] is True
+    assert gl_env.ledger[ALICE.lower()] == 8 * GEN
+
+
+def test_pay_raises_instead_of_swallowing(gl_env, contract):
+    """_pay must never silently no-op."""
+    class Dead:
+        def send(self, _amount):
+            raise RuntimeError("no transfer path")
+
+    with pytest.raises(Exception, match="payout failed"):
+        contract._pay(Dead(), 1)
+
+    with pytest.raises(Exception, match="INVARIANT"):
+        contract._pay(Dead(), 0)
+
+
+def test_successful_claim_pays_then_marks_claimed(gl_env, contract):
+    mid = _settled_up_market(gl_env, contract)
+    gl_env.set_sender(ALICE, 0)
+    assert int(contract.claim(gl_env.u256(mid))) == 8 * GEN
+    assert gl_env.ledger[ALICE.lower()] == 8 * GEN
+    assert contract.get_market(gl_env.u256(mid))["paid_out"] == 8 * GEN
+    gl_env.set_sender(ALICE, 0)
+    with pytest.raises(Exception, match="already claimed"):
+        contract.claim(gl_env.u256(mid))

@@ -11,7 +11,7 @@ public data sources and only finalizes a direction when both agree.
 - **Network:** GenLayer Bradbury Testnet, **chain id 4221**
 - **RPC:** https://rpc-bradbury.genlayer.com
 - **Explorer:** https://explorer-bradbury.genlayer.com
-- **Contract:** `0x3E726A419600Fd7b59de44fA12c3Daf154Df7953`
+- **Contract:** `0x91Bb7FDD22dE81109Eca288F3CC5921352cD637f`
 - **Faucet:** https://testnet-faucet.genlayer.foundation
 
 ## Assets, slugs and pairs
@@ -83,21 +83,34 @@ For each source independently: `direction = UP if close > open else DOWN`
 
 ### What the validators actually compare
 
-The equivalence-principle payload binds **normalized fields only**:
+The equivalence-principle payload carries **every field that gets
+persisted**, so stored evidence is a pure function of the consensus
+result:
 
 ```
 market_id | asset | coingecko_id | gate_pair | target_day
-          | source_a_direction | source_b_direction | final_result
+          | cm_open | cm_close | cm_direction
+          | gt_open | gt_close | gt_direction
+          | final_result
 ```
 
-Raw open/close prices are **excluded from the consensus key** on purpose.
-Two validators polling the public feeds seconds apart legitimately see
-different sample points; making prices part of the key would stall
-settlement even when both sources plainly agree on direction. Prices are
-still recorded as evidence after agreement, for display.
+Prices are scaled integers (`PRICE_SCALE = 10^8`) derived from the same
+fixed GMT+1 candle window on every validator, so they are deterministic —
+there is no float formatting and no "latest sample" ambiguity.
 
-A single source can never produce `UP` or `DOWN` — the contract asserts
-`cm_dir == gt_dir` before writing a directional result.
+This matters for correctness, not just tidiness. `resolve_market`
+performs **zero** web requests after `strict_eq` returns. If it re-fetched
+prices to store them, two validators could persist different evidence for
+the same market, and the GenVM linter rejects that path outright.
+
+`_parse_agreed` re-validates the whole payload before anything is
+written: the binding fields must match the market being resolved, each
+direction must actually follow from its own open/close, and `final` must
+equal `cm_dir` when the two agree and `INCONCLUSIVE` when they don't. A
+single source therefore can never produce `UP` or `DOWN`.
+
+The terminal-refund path performs no fetch at all and stores zeros with
+empty directions — it never fabricates prices.
 
 ## Permissions
 
@@ -107,6 +120,12 @@ A single source can never produce `UP` or `DOWN` — the contract asserts
 | `take_position`   | any caller while `OPEN`                     |
 | `resolve_market`  | any caller once settlement-eligible         |
 | `claim`           | only the position's owner, once             |
+
+`claim` transfers **before** it marks the position claimed. If the payout
+transfer fails the whole transaction reverts, leaving `claimed=false` and
+`paid_out` unchanged, so the owner can simply try again. The transfer
+helper never swallows an error — a silent failure would burn the position
+permanently.
 
 ## Architecture
 
@@ -160,7 +179,7 @@ outcomes.
 ## Local commands
 
 ```bash
-python -m pytest tests/direct tests/consensus -q   # 68 tests
+python -m pytest tests/direct tests/consensus -q   # 75 tests
 python scripts/check_sources.py                    # live endpoint probe
 python scripts/demo_predictions.py                 # 5 end-to-end lifecycles
 ```

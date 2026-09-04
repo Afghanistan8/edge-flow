@@ -9,7 +9,7 @@
 
 // Known Bradbury deployment. Kept in sync with frontend/.env.example.
 const FALLBACK_CONTRACT_ADDRESS =
-  "0x3E726A419600Fd7b59de44fA12c3Daf154Df7953";
+  "0x91Bb7FDD22dE81109Eca288F3CC5921352cD637f";
 const FALLBACK_RPC_URL = "https://rpc-bradbury.genlayer.com";
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;

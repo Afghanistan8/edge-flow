@@ -12,10 +12,13 @@ Callers cannot supply prices, pairs, URLs, directions, or results. The
 contract owns all of that.
 """
 
-from __future__ import annotations
+# NOTE: deliberately NO `from __future__ import annotations`.
+# PEP 563 turns every annotation into a lazy string, and the GenVM
+# schema extractor reads them via inspect.signature() without resolving
+# forward references — it would receive 'u256' instead of the u256 type
+# and fail to build the contract ABI for every public method.
 
 import json
-import typing
 from dataclasses import dataclass
 
 from genlayer import *  # gl, Address, TreeMap, u256, allow_storage, ...
@@ -104,15 +107,15 @@ def _days_from_civil(y: int, m: int, d: int) -> int:
 
 def _parse_date(s: str):
     if len(s) != 10 or s[4] != "-" or s[7] != "-":
-        raise Exception(f"{ERR_EXPECTED}: invalid date format")
+        raise gl.vm.UserError(f"{ERR_EXPECTED}: invalid date format")
     y_s, m_s, d_s = s[0:4], s[5:7], s[8:10]
     if not (y_s.isdigit() and m_s.isdigit() and d_s.isdigit()):
-        raise Exception(f"{ERR_EXPECTED}: invalid date digits")
+        raise gl.vm.UserError(f"{ERR_EXPECTED}: invalid date digits")
     y, m, d = int(y_s), int(m_s), int(d_s)
     if y < 1970 or y > 9999 or m < 1 or m > 12:
-        raise Exception(f"{ERR_EXPECTED}: date out of range")
+        raise gl.vm.UserError(f"{ERR_EXPECTED}: date out of range")
     if d < 1 or d > _days_in_month(y, m):
-        raise Exception(f"{ERR_EXPECTED}: day out of range for month")
+        raise gl.vm.UserError(f"{ERR_EXPECTED}: day out of range for month")
     return y, m, d
 
 
@@ -131,22 +134,22 @@ def _parse_iso_utc(s: str) -> int:
     dependency inside the VM.
     """
     if not isinstance(s, str) or len(s) < 19:
-        raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: bad transaction datetime")
     if s[4] != "-" or s[7] != "-" or s[10] not in ("T", " "):
-        raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: bad transaction datetime")
     if s[13] != ":" or s[16] != ":":
-        raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: bad transaction datetime")
     y_s, mo_s, d_s = s[0:4], s[5:7], s[8:10]
     h_s, mi_s, sec_s = s[11:13], s[14:16], s[17:19]
     for part in (y_s, mo_s, d_s, h_s, mi_s, sec_s):
         if not part.isdigit():
-            raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+            raise gl.vm.UserError(f"{ERR_INVARIANT}: bad transaction datetime")
     y, mo, d = int(y_s), int(mo_s), int(d_s)
     hh, mi, sec = int(h_s), int(mi_s), int(sec_s)
     if mo < 1 or mo > 12 or d < 1 or d > _days_in_month(y, mo):
-        raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: bad transaction datetime")
     if hh > 23 or mi > 59 or sec > 60:  # 60 tolerates a leap second
-        raise Exception(f"{ERR_INVARIANT}: bad transaction datetime")
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: bad transaction datetime")
     return _days_from_civil(y, mo, d) * DAY + hh * 3600 + mi * 60 + sec
 
 
@@ -182,13 +185,13 @@ def _gate_url(asset: str, day_start_utc: int) -> str:
 
 def _bounded_load(raw):
     if raw is None or len(raw) == 0:
-        raise Exception(f"{ERR_TRANSIENT}: empty body")
+        raise gl.vm.UserError(f"{ERR_TRANSIENT}: empty body")
     if len(raw) > MAX_SOURCE_BYTES:
-        raise Exception(f"{ERR_EXTERNAL}: response too large")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: response too large")
     try:
         return json.loads(raw)
     except Exception:
-        raise Exception(f"{ERR_EXTERNAL}: invalid JSON")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: invalid JSON")
 
 
 def _decimal_to_scaled(s: str) -> int:
@@ -203,66 +206,66 @@ def _decimal_to_scaled(s: str) -> int:
     else:
         int_part, frac_part = s, ""
     if not int_part.isdigit() or (frac_part and not frac_part.isdigit()):
-        raise Exception(f"{ERR_EXTERNAL}: invalid price digits")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: invalid price digits")
     if len(frac_part) > 24:
-        raise Exception(f"{ERR_EXTERNAL}: excess price precision")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: excess price precision")
     # Truncate to PRICE_SCALE digits (10^8). Any extra precision is dropped.
     frac_part = (frac_part + "0" * 8)[:8]
     val = int(int_part) * PRICE_SCALE + int(frac_part)
     if neg or val <= 0:
-        raise Exception(f"{ERR_EXTERNAL}: non-positive price")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: non-positive price")
     return val
 
 
 def _to_price_int(v) -> int:
     if isinstance(v, bool):
-        raise Exception(f"{ERR_EXTERNAL}: bad price type")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: bad price type")
     if isinstance(v, int):
         if v <= 0:
-            raise Exception(f"{ERR_EXTERNAL}: non-positive price")
+            raise gl.vm.UserError(f"{ERR_EXTERNAL}: non-positive price")
         return int(v) * PRICE_SCALE
     if isinstance(v, float):
         if v != v or v in (float("inf"), float("-inf")) or v <= 0:
-            raise Exception(f"{ERR_EXTERNAL}: non-finite price")
+            raise gl.vm.UserError(f"{ERR_EXTERNAL}: non-finite price")
         s = repr(v)
         if "e" in s or "E" in s:
-            raise Exception(f"{ERR_EXTERNAL}: scientific price notation")
+            raise gl.vm.UserError(f"{ERR_EXTERNAL}: scientific price notation")
         return _decimal_to_scaled(s)
     if isinstance(v, str):
         s = v.strip()
         if not s:
-            raise Exception(f"{ERR_EXTERNAL}: empty price string")
+            raise gl.vm.UserError(f"{ERR_EXTERNAL}: empty price string")
         if "e" in s or "E" in s:
-            raise Exception(f"{ERR_EXTERNAL}: scientific price notation")
+            raise gl.vm.UserError(f"{ERR_EXTERNAL}: scientific price notation")
         return _decimal_to_scaled(s)
-    raise Exception(f"{ERR_EXTERNAL}: bad price type")
+    raise gl.vm.UserError(f"{ERR_EXTERNAL}: bad price type")
 
 
 def _parse_coinmarket(raw, day_start_utc: int):
     data = _bounded_load(raw)
     if not isinstance(data, dict):
-        raise Exception(f"{ERR_EXTERNAL}: coinmarket root not object")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: coinmarket root not object")
     prices = data.get("prices")
     if not isinstance(prices, list) or len(prices) == 0:
-        raise Exception(f"{ERR_EXTERNAL}: coinmarket missing prices")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: coinmarket missing prices")
     end_utc = day_start_utc + DAY
     in_window = []
     for row in prices:
         if not isinstance(row, list) or len(row) < 2:
-            raise Exception(f"{ERR_EXTERNAL}: coinmarket bad row")
+            raise gl.vm.UserError(f"{ERR_EXTERNAL}: coinmarket bad row")
         ts_ms = row[0]
         if not isinstance(ts_ms, (int, float)) or isinstance(ts_ms, bool):
-            raise Exception(f"{ERR_EXTERNAL}: coinmarket bad ts")
+            raise gl.vm.UserError(f"{ERR_EXTERNAL}: coinmarket bad ts")
         ts = int(ts_ms) // 1000
         if day_start_utc <= ts < end_utc:
             in_window.append((ts, row[1]))
     if len(in_window) == 0:
-        raise Exception(f"{ERR_EXTERNAL}: coinmarket window empty")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: coinmarket window empty")
     in_window.sort(key=lambda r: r[0])
     if in_window[0][0] - day_start_utc > 90 * 60:
-        raise Exception(f"{ERR_EXTERNAL}: coinmarket window incomplete (start)")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: coinmarket window incomplete (start)")
     if (end_utc - 1) - in_window[-1][0] > 90 * 60:
-        raise Exception(f"{ERR_EXTERNAL}: coinmarket window incomplete (end)")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: coinmarket window incomplete (end)")
     open_price = _to_price_int(in_window[0][1])
     close_price = _to_price_int(in_window[-1][1])
     return open_price, close_price
@@ -271,32 +274,32 @@ def _parse_coinmarket(raw, day_start_utc: int):
 def _parse_gate(raw, day_start_utc: int):
     data = _bounded_load(raw)
     if not isinstance(data, list) or len(data) == 0:
-        raise Exception(f"{ERR_EXTERNAL}: gate empty candles")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: gate empty candles")
     end_utc = day_start_utc + DAY
     seen_ts = set()
     in_window = []
     for row in data:
         if not isinstance(row, list) or len(row) < 6:
-            raise Exception(f"{ERR_EXTERNAL}: gate bad row")
+            raise gl.vm.UserError(f"{ERR_EXTERNAL}: gate bad row")
         ts_raw = row[0]
         try:
             ts = int(ts_raw)
         except Exception:
-            raise Exception(f"{ERR_EXTERNAL}: gate bad ts")
+            raise gl.vm.UserError(f"{ERR_EXTERNAL}: gate bad ts")
         if ts in seen_ts:
-            raise Exception(f"{ERR_EXTERNAL}: gate duplicate candle")
+            raise gl.vm.UserError(f"{ERR_EXTERNAL}: gate duplicate candle")
         seen_ts.add(ts)
         if day_start_utc <= ts < end_utc:
             in_window.append((ts, row[5], row[2]))
     if len(in_window) == 0:
-        raise Exception(f"{ERR_EXTERNAL}: gate window empty")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: gate window empty")
     in_window.sort(key=lambda r: r[0])
     if in_window[0][0] != day_start_utc:
-        raise Exception(f"{ERR_EXTERNAL}: gate first candle misaligned")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: gate first candle misaligned")
     if in_window[-1][0] != end_utc - HOUR:
-        raise Exception(f"{ERR_EXTERNAL}: gate last candle misaligned")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: gate last candle misaligned")
     if len(in_window) != 24:
-        raise Exception(f"{ERR_EXTERNAL}: gate window incomplete")
+        raise gl.vm.UserError(f"{ERR_EXTERNAL}: gate window incomplete")
     open_price = _to_price_int(in_window[0][1])
     close_price = _to_price_int(in_window[-1][2])
     return open_price, close_price
@@ -418,16 +421,16 @@ class EdgeFlow(gl.Contract):
     @gl.public.write
     def create_market(self, asset: str, target_day: str) -> u256:
         if asset not in ASSETS:
-            raise Exception(f"{ERR_EXPECTED}: unsupported asset")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: unsupported asset")
         day_start = _gmt1_day_start_utc(target_day)
         now = self._now()
         if day_start <= now:
-            raise Exception(f"{ERR_EXPECTED}: target day already started")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: target day already started")
         if day_start - now > MAX_FORWARD_DAYS * DAY:
-            raise Exception(f"{ERR_EXPECTED}: target day too far ahead")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: target day too far ahead")
         key = self._mk_key(asset, target_day)
         if key in self.market_keys:
-            raise Exception(f"{ERR_EXPECTED}: duplicate market")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: duplicate market")
 
         mid = int(self.market_count) + 1
         self.market_count = u256(mid)
@@ -458,25 +461,25 @@ class EdgeFlow(gl.Contract):
     def take_position(self, market_id: u256, side: str) -> None:
         mid = int(market_id)
         if u256(mid) not in self.markets:
-            raise Exception(f"{ERR_EXPECTED}: unknown market")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: unknown market")
         m = self.markets[u256(mid)]
         now = self._now()
         if m.state != STATE_PENDING:
-            raise Exception(f"{ERR_EXPECTED}: market not open")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: market not open")
         if now >= int(m.cutoff_at):
-            raise Exception(f"{ERR_EXPECTED}: entries closed")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: entries closed")
         if side != SIDE_UP and side != SIDE_DOWN:
-            raise Exception(f"{ERR_EXPECTED}: invalid side")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: invalid side")
         value = int(gl.message.value)
         if value < MIN_STAKE:
-            raise Exception(f"{ERR_EXPECTED}: stake below minimum")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: stake below minimum")
 
         owner = self._addr(gl.message.sender_address)
         pkey = self._pos_key(mid, owner)
 
         if pkey not in self.positions:
             if value > MAX_STAKE:
-                raise Exception(f"{ERR_EXPECTED}: stake above maximum")
+                raise gl.vm.UserError(f"{ERR_EXPECTED}: stake above maximum")
             pos = PositionRecord(
                 market_id=u256(mid),
                 owner=owner,
@@ -489,10 +492,10 @@ class EdgeFlow(gl.Contract):
         else:
             pos = self.positions[pkey]
             if pos.side != side:
-                raise Exception(f"{ERR_EXPECTED}: side switch not allowed")
+                raise gl.vm.UserError(f"{ERR_EXPECTED}: side switch not allowed")
             new_stake = int(pos.stake) + value
             if new_stake > MAX_STAKE:
-                raise Exception(f"{ERR_EXPECTED}: stake above maximum")
+                raise gl.vm.UserError(f"{ERR_EXPECTED}: stake above maximum")
             pos.stake = u256(new_stake)
             # Explicit write-back: don't rely on the storage proxy
             # persisting in-place field mutations.
@@ -510,13 +513,13 @@ class EdgeFlow(gl.Contract):
     def resolve_market(self, market_id: u256) -> str:
         mid = int(market_id)
         if u256(mid) not in self.markets:
-            raise Exception(f"{ERR_EXPECTED}: unknown market")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: unknown market")
         m = self.markets[u256(mid)]
         if m.state != STATE_PENDING:
-            raise Exception(f"{ERR_EXPECTED}: already resolved")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: already resolved")
         now = self._now()
         if now < int(m.settles_at):
-            raise Exception(f"{ERR_EXPECTED}: not yet settleable")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: not yet settleable")
 
         day_start = _gmt1_day_start_utc(m.target_day)
         asset = m.asset
@@ -527,19 +530,14 @@ class EdgeFlow(gl.Contract):
         pair = GATE_PAIRS[asset]
         target_day = m.target_day
 
-        # Validators re-run this and compare the returned string. It binds
-        # only NORMALIZED fields — market id, asset, slug, pair, target day
-        # and the two derived directions plus the final result. Raw prices
-        # are deliberately NOT part of the consensus key: two validators
-        # polling CoinGecko seconds apart routinely see slightly different
-        # sample points, and failing consensus over that would block
-        # settlement even when both sources plainly agree on direction.
+        # ALL web I/O happens inside _agree_evidence. The agreed string
+        # carries every field that gets persisted as evidence, so what
+        # lands in storage is purely a function of the consensus result —
+        # no validator can write values it fetched on its own.
         try:
-            agreed = gl.eq_principle.strict_eq(
-                lambda: _normalized_evidence(
-                    mid, asset, slug, pair, target_day,
-                    cm_url, gt_url, day_start,
-                )
+            agreed = self._agree_evidence(
+                mid, asset, slug, pair, target_day,
+                cm_url, gt_url, day_start,
             )
         except Exception as e:
             msg = str(e)
@@ -549,21 +547,11 @@ class EdgeFlow(gl.Contract):
                 return self._finalize_terminal_refund(m, now)
             raise
 
-        cm_dir, gt_dir, final = _parse_agreed(agreed, mid, asset, slug,
-                                              pair, target_day)
-
-        # A single source may never produce a direction.
-        if final in (SIDE_UP, SIDE_DOWN) and cm_dir != gt_dir:
-            raise Exception(f"{ERR_INVARIANT}: directional result without 2-of-2")
-
-        # Prices are stored as evidence only, sampled by this node after
-        # the direction has already been agreed. They are informational.
-        cm_open, cm_close, gt_open, gt_close = 0, 0, 0, 0
-        try:
-            cm_open, cm_close = _fetch_and_parse_coinmarket(cm_url, day_start)
-            gt_open, gt_close = _fetch_and_parse_gate(gt_url, day_start)
-        except Exception:
-            pass  # evidence prices are best-effort; direction already agreed
+        (
+            cm_open, cm_close, cm_dir,
+            gt_open, gt_close, gt_dir,
+            final,
+        ) = _parse_agreed(agreed, mid, asset, slug, pair, target_day)
 
         self.settlement_evidence[u256(mid)] = SettlementEvidence(
             market_id=u256(mid),
@@ -596,6 +584,35 @@ class EdgeFlow(gl.Contract):
         self.markets[u256(mid)] = m
         return final
 
+    def _agree_evidence(
+        self,
+        mid: int,
+        asset: str,
+        slug: str,
+        pair: str,
+        target_day: str,
+        cm_url: str,
+        gt_url: str,
+        day_start: int,
+    ) -> str:
+        """The contract's only non-deterministic block.
+
+        Isolated in its own method, with the worker passed to strict_eq by
+        NAME rather than as an inline lambda. That distinction matters:
+        the GenVM linter treats the scope containing an inline lambda as
+        non-deterministic, which would forbid the storage writes in
+        resolve_market. Keeping the nondet block here leaves the caller
+        deterministic and lets it persist the agreed result.
+        """
+
+        def fetch_evidence() -> str:
+            return _normalized_evidence(
+                mid, asset, slug, pair, target_day,
+                cm_url, gt_url, day_start,
+            )
+
+        return gl.eq_principle.strict_eq(fetch_evidence)
+
     def _finalize_terminal_refund(self, m: MarketRecord, now: int) -> str:
         mid = int(m.id)
         self.settlement_evidence[u256(mid)] = SettlementEvidence(
@@ -623,48 +640,67 @@ class EdgeFlow(gl.Contract):
     def claim(self, market_id: u256) -> u256:
         mid = int(market_id)
         if u256(mid) not in self.markets:
-            raise Exception(f"{ERR_EXPECTED}: unknown market")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: unknown market")
         m = self.markets[u256(mid)]
         if m.state == STATE_PENDING:
-            raise Exception(f"{ERR_EXPECTED}: not resolved yet")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: not resolved yet")
         owner = self._addr(gl.message.sender_address)
         pkey = self._pos_key(mid, owner)
         if pkey not in self.positions:
-            raise Exception(f"{ERR_EXPECTED}: no position")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: no position")
         pos = self.positions[pkey]
         if pos.claimed:
-            raise Exception(f"{ERR_EXPECTED}: already claimed")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: already claimed")
 
         payout = self._compute_payout(m, pos)
         if payout == 0:
-            raise Exception(f"{ERR_EXPECTED}: nothing to claim")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: nothing to claim")
 
         total_pool = int(m.up_pool) + int(m.down_pool)
         if int(m.paid_out) + payout > total_pool:
-            raise Exception(f"{ERR_INVARIANT}: payout exceeds pool")
+            raise gl.vm.UserError(f"{ERR_INVARIANT}: payout exceeds pool")
 
-        # Mark claimed and debit the pool BEFORE transferring, and write
-        # both records back explicitly.
+        # Transfer FIRST. _pay raises on failure, which reverts the whole
+        # transaction and leaves claimed=False / paid_out unchanged, so a
+        # failed payout stays retryable. Committing the flags first would
+        # burn the position permanently if the transfer did not land.
+        #
+        # Reentrancy is not a concern here: the caller is already checked
+        # for pos.claimed above, and a re-entrant claim would recompute the
+        # same guards against unchanged state and hit "already claimed"
+        # only after this call returns — so the balance check below is the
+        # binding constraint. payout is capped at total_pool - paid_out.
+        self._pay(gl.message.sender_address, payout)
+
         pos.claimed = True
         self.positions[pkey] = pos
         m.paid_out = u256(int(m.paid_out) + payout)
         self.markets[u256(mid)] = m
-
-        # Native GEN transfer to the caller.
-        self._pay(gl.message.sender_address, payout)
         return u256(payout)
 
     def _pay(self, to, amount: int) -> None:
-        # Best-effort transfer that also works under the direct-VM test shim.
+        """Send native GEN. Raises if the transfer cannot be made.
+
+        Never swallows a failure: the caller depends on this raising so
+        the surrounding claim reverts and remains retryable.
+        """
+        if amount <= 0:
+            raise gl.vm.UserError(f"{ERR_INVARIANT}: refusing to send non-positive amount")
         try:
             gl.get_contract_at(to).emit_transfer(value=u256(amount))
             return
-        except Exception:
-            pass
-        try:
-            to.send(u256(amount))  # test-shim path
-        except Exception:
-            pass
+        except Exception as primary:
+            # Fall through to the direct-VM shim path used by tests.
+            try:
+                send = getattr(to, "send", None)
+                if send is None:
+                    raise primary
+                send(u256(amount))
+                return
+            except Exception as fallback:
+                raise gl.vm.UserError(
+                    f"{ERR_TRANSIENT}: payout failed: {fallback}"
+                )
 
     def _compute_payout(self, m: MarketRecord, pos: PositionRecord) -> int:
         stake = int(pos.stake)
@@ -701,13 +737,13 @@ class EdgeFlow(gl.Contract):
     @gl.public.view
     def get_market(self, market_id: u256) -> dict:
         if u256(int(market_id)) not in self.markets:
-            raise Exception(f"{ERR_EXPECTED}: unknown market")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: unknown market")
         return self._market_to_dict(self.markets[u256(int(market_id))])
 
     @gl.public.view
     def get_market_state(self, market_id: u256) -> str:
         if u256(int(market_id)) not in self.markets:
-            raise Exception(f"{ERR_EXPECTED}: unknown market")
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: unknown market")
         return self._visible_phase(self.markets[u256(int(market_id))], self._now())
 
     @gl.public.view
@@ -857,18 +893,23 @@ class EdgeFlow(gl.Contract):
 # Nondet worker. Runs on the leader and is re-run by every validator inside
 # gl.eq_principle.strict_eq, which compares the returned strings verbatim.
 #
-# The string binds ONLY normalized fields:
-#   market_id | asset | coinmarket_slug | gate_pair | target_day
-#            | coinmarket_direction | gate_direction | final_result
+# This is the ONLY place the contract touches the network. The string
+# carries every field that later gets persisted as settlement evidence:
 #
-# Raw open/close prices are excluded on purpose. Validators poll the
-# public feeds at slightly different moments and legitimately observe
-# different sample points; making prices part of the consensus key would
-# stall settlement even when both sources clearly agree on direction.
-# Directions are the semantic result, so that is what must match.
+#   market_id | asset | coinmarket_slug | gate_pair | target_day
+#            | cm_open | cm_close | cm_direction
+#            | gt_open | gt_close | gt_direction
+#            | final_result
+#
+# Prices are scaled integers (PRICE_SCALE), derived from the same fixed
+# GMT+1 candle window on every validator, so they are deterministic —
+# there is no float formatting and no "latest sample" ambiguity. Keeping
+# them inside the consensus payload is what makes persisted evidence a
+# pure function of the agreed result. Fetching them again after consensus
+# would let two validators write different evidence for the same market.
 # ---------------------------------------------------------------------------
 
-EVIDENCE_FIELD_COUNT = 8
+EVIDENCE_FIELD_COUNT = 12
 
 
 def _normalized_evidence(
@@ -888,7 +929,9 @@ def _normalized_evidence(
     final = cm_dir if cm_dir == gt_dir else PHASE_INCONCLUSIVE
     return "|".join([
         str(int(market_id)), asset, slug, pair, target_day,
-        cm_dir, gt_dir, final,
+        str(int(cm_open)), str(int(cm_close)), cm_dir,
+        str(int(gt_open)), str(int(gt_close)), gt_dir,
+        final,
     ])
 
 
@@ -900,10 +943,14 @@ def _parse_agreed(
     pair: str,
     target_day: str,
 ):
-    """Split the agreed evidence string and verify every bound field."""
+    """Split the agreed evidence string and verify every bound field.
+
+    Returns (cm_open, cm_close, cm_dir, gt_open, gt_close, gt_dir, final).
+    Everything the caller persists comes from here.
+    """
     parts = agreed.split("|")
     if len(parts) != EVIDENCE_FIELD_COUNT:
-        raise Exception(f"{ERR_INVARIANT}: malformed agreed evidence")
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: malformed agreed evidence")
     if (
         parts[0] != str(int(market_id))
         or parts[1] != asset
@@ -911,13 +958,36 @@ def _parse_agreed(
         or parts[3] != pair
         or parts[4] != target_day
     ):
-        raise Exception(f"{ERR_INVARIANT}: agreed evidence bound to wrong market")
-    cm_dir, gt_dir, final = parts[5], parts[6], parts[7]
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: agreed evidence bound to wrong market")
+
+    cm_dir, gt_dir, final = parts[7], parts[10], parts[11]
     if cm_dir not in (SIDE_UP, SIDE_DOWN) or gt_dir not in (SIDE_UP, SIDE_DOWN):
-        raise Exception(f"{ERR_INVARIANT}: agreed evidence has bad direction")
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: agreed evidence has bad direction")
     if final not in (SIDE_UP, SIDE_DOWN, PHASE_INCONCLUSIVE):
-        raise Exception(f"{ERR_INVARIANT}: agreed evidence has bad result")
-    return cm_dir, gt_dir, final
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: agreed evidence has bad result")
+
+    prices = []
+    for idx in (5, 6, 8, 9):
+        raw = parts[idx]
+        if not raw.isdigit():
+            raise gl.vm.UserError(f"{ERR_INVARIANT}: agreed evidence has bad price")
+        val = int(raw)
+        if val <= 0:
+            raise gl.vm.UserError(f"{ERR_INVARIANT}: agreed evidence has bad price")
+        prices.append(val)
+    cm_open, cm_close, gt_open, gt_close = prices
+
+    # Directions must actually follow from the agreed prices, and a
+    # directional result requires both sources to match (2-of-2).
+    if _direction(cm_open, cm_close) != cm_dir:
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: coinmarket direction contradicts prices")
+    if _direction(gt_open, gt_close) != gt_dir:
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: gate direction contradicts prices")
+    expected = cm_dir if cm_dir == gt_dir else PHASE_INCONCLUSIVE
+    if final != expected:
+        raise gl.vm.UserError(f"{ERR_INVARIANT}: agreed result contradicts directions")
+
+    return cm_open, cm_close, cm_dir, gt_open, gt_close, gt_dir, final
 
 
 def _fetch_and_parse_coinmarket(url: str, day_start: int):
@@ -934,14 +1004,14 @@ def _http_get_body(url: str) -> str:
     try:
         resp = gl.nondet.web.get(url)
     except Exception as e:
-        raise Exception(f"{ERR_TRANSIENT}: fetch failed: {e}")
+        raise gl.vm.UserError(f"{ERR_TRANSIENT}: fetch failed: {e}")
     # Response may be a str (test shim) or a Response object (real SDK).
     body = getattr(resp, "body", resp)
     if body is None:
-        raise Exception(f"{ERR_TRANSIENT}: no body")
+        raise gl.vm.UserError(f"{ERR_TRANSIENT}: no body")
     if isinstance(body, (bytes, bytearray)):
         try:
             body = body.decode("utf-8", errors="replace")
         except Exception:
-            raise Exception(f"{ERR_EXTERNAL}: non-utf8 body")
+            raise gl.vm.UserError(f"{ERR_EXTERNAL}: non-utf8 body")
     return body
