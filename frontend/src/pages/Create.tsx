@@ -33,6 +33,8 @@ export function CreatePage() {
   }, [day]);
 
   async function submit() {
+    // Guard against a second wallet popup while one create is in flight.
+    if (create.isPending) return;
     setStage("wallet");
     setErr(undefined);
     try {
@@ -99,16 +101,21 @@ export function CreatePage() {
 
       <button
         onClick={submit}
-        disabled={!preview}
+        disabled={!preview || create.isPending}
         className="w-full py-2 rounded bg-[var(--ef-accent)] text-black ef-mono text-sm"
       >
-        create market
+        {create.isPending
+          ? create.retry
+            ? `node busy — retrying (${create.retry.attempt}/${create.retry.maxAttempts})`
+            : "creating…"
+          : "create market"}
       </button>
 
       <TxDialog
         open={stage !== null}
-        stage={stage ?? "review"}
+        stage={create.retry && stage === "wallet" ? "retrying" : stage ?? "review"}
         error={err}
+        retry={create.retry}
         onClose={() => setStage(null)}
       />
     </div>

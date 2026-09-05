@@ -10,7 +10,25 @@
 // Known Bradbury deployment. Kept in sync with frontend/.env.example.
 const FALLBACK_CONTRACT_ADDRESS =
   "0x91Bb7FDD22dE81109Eca288F3CC5921352cD637f";
-const FALLBACK_RPC_URL = "https://rpc-bradbury.genlayer.com";
+// Canonical Bradbury endpoints.
+//
+// Note on the banned host: ChainList publishes chain 4221 with the public
+// zkSync-OS endpoint below, and wallets that added Bradbury from there
+// broadcast through it. That node rate-limits eth_sendRawTransaction and
+// answers -32005 "gas rate limit exceeded ... retryAfterMs". It is never
+// a valid endpoint for Edge-Flow traffic.
+export const PRIMARY_RPC = "https://rpc-bradbury.genlayer.com";
+export const FALLBACK_RPC = "https://rpc.testnet-chain.genlayer.com";
+export const BANNED_RPC_HOSTS = ["zksync-os-testnet-genlayer.zksync.dev"];
+
+/** True if a URL points at an endpoint we refuse to send traffic to. */
+export function isBannedRpc(url: string): boolean {
+  if (!url) return false;
+  const lowered = url.toLowerCase();
+  return BANNED_RPC_HOSTS.some((h) => lowered.includes(h));
+}
+
+const FALLBACK_RPC_URL = PRIMARY_RPC;
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -29,8 +47,19 @@ function pickAddress(): string {
 
 export const CONTRACT_ADDRESS = pickAddress();
 
-export const RPC_URL =
-  (import.meta.env.VITE_GENLAYER_RPC_URL ?? "").trim() || FALLBACK_RPC_URL;
+function pickRpc(): string {
+  const fromEnv = (import.meta.env.VITE_GENLAYER_RPC_URL ?? "").trim();
+  if (!fromEnv) return FALLBACK_RPC_URL;
+  if (isBannedRpc(fromEnv)) {
+    console.warn(
+      `[edge-flow] VITE_GENLAYER_RPC_URL points at a rate-limited endpoint (${fromEnv}); using ${PRIMARY_RPC} instead.`,
+    );
+    return PRIMARY_RPC;
+  }
+  return fromEnv;
+}
+
+export const RPC_URL = pickRpc();
 
 // WalletConnect Cloud project id. Optional: without it, injected wallets
 // (MetaMask, Rabby, Brave) still work — only the WalletConnect QR path is

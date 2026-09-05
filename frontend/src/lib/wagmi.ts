@@ -10,9 +10,17 @@ import {
   NATIVE_SYMBOL,
   NETWORK_CHAIN_ID,
   NETWORK_NAME,
+  PRIMARY_RPC,
   RPC_URL,
   WALLETCONNECT_PROJECT_ID,
+  isBannedRpc,
 } from "./config";
+
+// The chain we advertise to wallets. Never the public zkSync-OS endpoint:
+// wagmi's connectors copy chain.rpcUrls.default.http[0] straight into
+// wallet_addEthereumChain, so a bad value here would be what the wallet
+// stores and broadcasts through.
+const CHAIN_RPC = isBannedRpc(RPC_URL) ? PRIMARY_RPC : RPC_URL || PRIMARY_RPC;
 
 export const bradbury = defineChain({
   id: NETWORK_CHAIN_ID,
@@ -23,7 +31,7 @@ export const bradbury = defineChain({
     decimals: NATIVE_DECIMALS,
   },
   rpcUrls: {
-    default: { http: [RPC_URL] },
+    default: { http: [CHAIN_RPC] },
   },
   blockExplorers: {
     default: { name: "GenLayer Bradbury Explorer", url: EXPLORER_URL },
@@ -41,7 +49,7 @@ function buildConfig() {
       appName: "Edge-Flow",
       projectId: WALLETCONNECT_PROJECT_ID,
       chains: [bradbury],
-      transports: { [bradbury.id]: http(RPC_URL) },
+      transports: { [bradbury.id]: http(CHAIN_RPC) },
       ssr: false,
     });
   }
@@ -55,7 +63,7 @@ function buildConfig() {
   return createConfig({
     chains: [bradbury],
     connectors: [injected()],
-    transports: { [bradbury.id]: http(RPC_URL) },
+    transports: { [bradbury.id]: http(CHAIN_RPC) },
     ssr: false,
   });
 }

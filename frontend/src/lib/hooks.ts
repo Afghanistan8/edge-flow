@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAccount, useChainId, useSwitchChain } from "wagmi";
 import { NETWORK_CHAIN_ID } from "./config";
@@ -16,22 +17,37 @@ import {
   resolveMarketTx,
   takePositionTx,
 } from "./contract";
-import { isConfigured } from "./genlayer";
+import { isConfigured, type WriteProgress } from "./genlayer";
+import { ensureBradburyNetwork } from "./walletNetwork";
 
 function requireAccount(address?: string): string {
   if (!address) throw new Error("Connect a wallet before sending a transaction");
   return address;
 }
 
-// Ensures the connected wallet is on Bradbury (chain 4221) before a
-// write goes out. If the wallet is on the wrong chain, wagmi's
-// switchChain triggers wallet_switchEthereumChain and, when the wallet
-// doesn't know Bradbury yet, wallet_addEthereumChain — both surface a
-// prompt in the wallet UI.
+/** Retry state a page can render while a write is being re-attempted. */
+export interface RetryState {
+  attempt: number;
+  maxAttempts: number;
+}
+
+/**
+ * Point the wallet at Bradbury *and* at the canonical RPC before a write.
+ *
+ * Switching the chain id alone is not enough. A wallet that already knows
+ * chain 4221 from ChainList keeps the public zkSync-OS endpoint, which
+ * rate-limits broadcasts with -32005. wallet_addEthereumChain asks it to
+ * adopt rpc-bradbury instead; MetaMask may decline to overwrite an
+ * existing entry, which is why writes also retry and the UI explains the
+ * manual fix.
+ */
 function useEnsureBradbury() {
   const chainId = useChainId();
   const { switchChainAsync } = useSwitchChain();
   return async () => {
+    // Always offer the canonical RPC, even when already on 4221 — the
+    // chain id can be right while the endpoint is the rate-limited one.
+    await ensureBradburyNetwork();
     if (chainId === NETWORK_CHAIN_ID) return;
     try {
       await switchChainAsync({ chainId: NETWORK_CHAIN_ID });
@@ -45,6 +61,15 @@ function useEnsureBradbury() {
       );
     }
   };
+}
+
+/** Bridges genlayer-js retry callbacks into React state for the dialog. */
+function useRetryTracker() {
+  const [retry, setRetry] = useState<RetryState | null>(null);
+  const onProgress: WriteProgress = ({ attempt, maxAttempts }) =>
+    setRetry({ attempt, maxAttempts });
+  const reset = () => setRetry(null);
+  return { retry, onProgress, reset };
 }
 
 const enabled = () => isConfigured();
@@ -149,20 +174,25 @@ export function useCreateMarket() {
   const qc = useQueryClient();
   const { address } = useAccount();
   const ensureChain = useEnsureBradbury();
-  return useMutation({
+  const { retry, onProgress, reset } = useRetryTracker();
+  const m = useMutation({
     mutationFn: async ({ asset, day }: { asset: Asset; day: string }) => {
+      reset();
       await ensureChain();
-      return createMarketTx(requireAccount(address), asset, day);
+      return createMarketTx(requireAccount(address), asset, day, onProgress);
     },
     onSuccess: () => invalidateAll(qc),
+    onSettled: () => reset(),
   });
+  return Object.assign(m, { retry });
 }
 
 export function useTakePosition() {
   const qc = useQueryClient();
   const { address } = useAccount();
   const ensureChain = useEnsureBradbury();
-  return useMutation({
+  const { retry, onProgress, reset } = useRetryTracker();
+  const m = useMutation({
     mutationFn: async ({
       marketId,
       side,
@@ -172,35 +202,48 @@ export function useTakePosition() {
       side: "UP" | "DOWN";
       stakeWei: bigint;
     }) => {
+      reset();
       await ensureChain();
-      return takePositionTx(requireAccount(address), marketId, side, stakeWei);
+      return takePositionTx(
+        requireAccount(address), marketId, side, stakeWei, onProgress,
+      );
     },
     onSuccess: (_r, vars) => invalidateAll(qc, vars.marketId),
+    onSettled: () => reset(),
   });
+  return Object.assign(m, { retry });
 }
 
 export function useResolve() {
   const qc = useQueryClient();
   const { address } = useAccount();
   const ensureChain = useEnsureBradbury();
-  return useMutation({
+  const { retry, onProgress, reset } = useRetryTracker();
+  const m = useMutation({
     mutationFn: async (marketId: number) => {
+      reset();
       await ensureChain();
-      return resolveMarketTx(requireAccount(address), marketId);
+      return resolveMarketTx(requireAccount(address), marketId, onProgress);
     },
     onSuccess: (_r, marketId) => invalidateAll(qc, marketId),
+    onSettled: () => reset(),
   });
+  return Object.assign(m, { retry });
 }
 
 export function useClaim() {
   const qc = useQueryClient();
   const { address } = useAccount();
   const ensureChain = useEnsureBradbury();
-  return useMutation({
+  const { retry, onProgress, reset } = useRetryTracker();
+  const m = useMutation({
     mutationFn: async (marketId: number) => {
+      reset();
       await ensureChain();
-      return claimTx(requireAccount(address), marketId);
+      return claimTx(requireAccount(address), marketId, onProgress);
     },
     onSuccess: (_r, marketId) => invalidateAll(qc, marketId),
+    onSettled: () => reset(),
   });
+  return Object.assign(m, { retry });
 }

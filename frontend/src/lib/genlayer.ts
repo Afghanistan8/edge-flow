@@ -3,10 +3,26 @@
 // Reads use an account-less client. Writes need both a connected address
 // and the injected provider, so genlayer-js routes eth_sendTransaction to
 // the wallet instead of the read-only public RPC.
+//
+// IMPORTANT — where writes actually go. genlayer-js keeps
+// eth_sendTransaction in its PROVIDER_METHODS set, so that call is handed
+// to window.ethereum and the WALLET broadcasts it using whatever RPC it
+// has stored for chain 4221. Our RPC config governs reads only. A wallet
+// that added Bradbury from ChainList holds the public zkSync-OS endpoint,
+// which rate-limits and returns -32005. We cannot silently rewrite the
+// wallet's endpoint, so we do three things: pin our own chain object to
+// the canonical RPC, ask the wallet to adopt it (see useEnsureBradbury),
+// and retry -32005 using the retryAfterMs the node hands back.
 
 import { createClient } from "genlayer-js";
 import { testnetBradbury } from "genlayer-js/chains";
-import { CONTRACT_ADDRESS, NETWORK_CHAIN_ID, RPC_URL } from "./config";
+import {
+  CONTRACT_ADDRESS,
+  NETWORK_CHAIN_ID,
+  PRIMARY_RPC,
+  RPC_URL,
+  isBannedRpc,
+} from "./config";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = any;
@@ -18,18 +34,17 @@ function injectedProvider(): unknown | undefined {
 }
 
 /**
- * genlayer-js already ships the Bradbury chain with the correct consensus
- * contract addresses. We only layer an RPC override on top when the
- * operator set one; the chain id stays 4221 either way.
+ * Chain object for the SDK. genlayer-js ships Bradbury with the correct
+ * consensus addresses; we always override rpcUrls so a future SDK change
+ * (or a stale cached copy) can never point our traffic at a rate-limited
+ * endpoint. Chain id stays 4221 either way.
  */
 function chain() {
-  if (RPC_URL && RPC_URL !== testnetBradbury.rpcUrls.default.http[0]) {
-    return {
-      ...testnetBradbury,
-      rpcUrls: { default: { http: [RPC_URL] } },
-    };
-  }
-  return testnetBradbury;
+  const rpc = isBannedRpc(RPC_URL) ? PRIMARY_RPC : RPC_URL || PRIMARY_RPC;
+  return {
+    ...testnetBradbury,
+    rpcUrls: { default: { http: [rpc] } },
+  };
 }
 
 let readClient: AnyClient | null = null;
@@ -77,10 +92,103 @@ export async function readContract<T = unknown>(
   })) as T;
 }
 
+// ---------------------------------------------------------------------
+// Rate-limit aware retry
+// ---------------------------------------------------------------------
+
+const MAX_ATTEMPTS = 5;
+const BASE_BACKOFF_MS = 800;
+
+/** Progress callback so the UI can say "retrying, attempt 2 of 5". */
+export type WriteProgress = (info: {
+  attempt: number;
+  maxAttempts: number;
+  waitMs: number;
+}) => void;
+
+function errText(e: unknown): string {
+  const err = e as {
+    shortMessage?: string;
+    details?: string;
+    message?: string;
+    cause?: { message?: string };
+  };
+  return [
+    err?.shortMessage,
+    err?.details,
+    err?.message,
+    err?.cause?.message,
+    typeof e === "string" ? e : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function errCode(e: unknown): number | undefined {
+  const seen = new Set<unknown>();
+  let cur: unknown = e;
+  while (cur && typeof cur === "object" && !seen.has(cur)) {
+    seen.add(cur);
+    const c = (cur as { code?: unknown }).code;
+    if (typeof c === "number") return c;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+/** Pull retryAfterMs out of the node's error payload, if present. */
+function retryAfterMs(e: unknown): number | undefined {
+  const seen = new Set<unknown>();
+  let cur: unknown = e;
+  while (cur && typeof cur === "object" && !seen.has(cur)) {
+    seen.add(cur);
+    const data = (cur as { data?: { retryAfterMs?: unknown } }).data;
+    const v = data?.retryAfterMs;
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  // Fall back to scraping the serialized message.
+  const m = errText(e).match(/"?retryAfterMs"?\s*:\s*(\d+)/);
+  if (m?.[1]) return Number(m[1]);
+  return undefined;
+}
+
+/** User rejection / wrong network / no funds must never be retried. */
+function isTerminal(e: unknown): boolean {
+  const code = errCode(e);
+  if (code === 4001) return true;
+  const t = errText(e).toLowerCase();
+  return (
+    /user rejected|user denied|rejected the request/.test(t) ||
+    /insufficient funds/.test(t) ||
+    /chain \d+ but client is configured|wrong network|chain mismatch/.test(t)
+  );
+}
+
+/** The node is momentarily at capacity — safe and correct to retry. */
+function isRateLimited(e: unknown): boolean {
+  if (isTerminal(e)) return false;
+  if (errCode(e) === -32005) return true;
+  const t = errText(e).toLowerCase();
+  return (
+    t.includes("gas rate limit exceeded") ||
+    t.includes("node is at capacity") ||
+    t.includes("zksync-os-testnet-genlayer") ||
+    t.includes("retryafterms") ||
+    t.includes("too many requests")
+  );
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function writeContract(
   method: string,
   args: unknown[] = [],
-  opts: { value?: bigint; account?: string } = {},
+  opts: {
+    value?: bigint;
+    account?: string;
+    onProgress?: WriteProgress;
+  } = {},
 ): Promise<string> {
   if (!isConfigured()) {
     throw new Error(
@@ -91,33 +199,53 @@ export async function writeContract(
     throw new Error("Connect a wallet before sending a transaction.");
   }
   const client = getWriteClient(opts.account);
-  try {
-    return (await client.writeContract({
-      address: CONTRACT_ADDRESS,
-      functionName: method,
-      args,
-      value: opts.value ?? 0n,
-    })) as string;
-  } catch (e) {
-    throw normalizeWriteError(e);
+
+  let last: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return (await client.writeContract({
+        address: CONTRACT_ADDRESS,
+        functionName: method,
+        args,
+        value: opts.value ?? 0n,
+      })) as string;
+    } catch (e) {
+      last = e;
+      if (!isRateLimited(e) || attempt === MAX_ATTEMPTS) break;
+      // Honour the node's own hint when it gives one, else exponential.
+      const hinted = retryAfterMs(e);
+      const wait = hinted ?? BASE_BACKOFF_MS * 2 ** (attempt - 1);
+      opts.onProgress?.({ attempt, maxAttempts: MAX_ATTEMPTS, waitMs: wait });
+      // Pad the node's hint slightly; retrying exactly on the boundary
+      // tends to collide with the same window again.
+      await sleep(wait + 150);
+    }
   }
+  throw normalizeWriteError(last);
 }
 
 /** Turn viem/wallet noise into something a user can act on. */
-function normalizeWriteError(e: unknown): Error {
-  const err = e as {
-    code?: number;
-    shortMessage?: string;
-    details?: string;
-    message?: string;
-  };
-  const raw = err?.shortMessage ?? err?.details ?? err?.message ?? String(e);
+export function normalizeWriteError(e: unknown): Error {
+  const raw = errText(e) || String(e);
 
-  // EIP-1193 user rejection.
-  if (err?.code === 4001 || /user rejected|user denied/i.test(raw)) {
+  if (errCode(e) === 4001 || /user rejected|user denied/i.test(raw)) {
     return new Error("Transaction rejected in wallet.");
   }
-  if (/chain \d+ but client is configured|wrong network|chain mismatch/i.test(raw)) {
+  if (isRateLimited(e)) {
+    // Never surface the bare viem "[From https://zksync-os-...]" blob as
+    // the whole message — it tells the user nothing actionable.
+    return new Error(
+      "The Bradbury node your wallet is using is at capacity (gas rate limit). " +
+        "Wait a moment and press Create again.\n\n" +
+        "If this keeps happening, your wallet is broadcasting through the " +
+        "public zkSync-OS endpoint. In MetaMask open Settings > Networks > " +
+        "GenLayer Bradbury Testnet and set the RPC URL to " +
+        `${PRIMARY_RPC} (chain id ${NETWORK_CHAIN_ID}).`,
+    );
+  }
+  if (
+    /chain \d+ but client is configured|wrong network|chain mismatch/i.test(raw)
+  ) {
     return new Error(
       `Wallet is on the wrong network. Switch to ${testnetBradbury.name} (chain ${NETWORK_CHAIN_ID}) and try again.`,
     );

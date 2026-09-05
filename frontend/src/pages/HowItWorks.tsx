@@ -64,6 +64,19 @@ export function HowItWorksPage() {
       />
 
       <Section
+        title="Wallet setup · use the right RPC"
+        body={
+          "Your wallet must use https://rpc-bradbury.genlayer.com for chain " +
+          "4221. ChainList lists Bradbury with a public zkSync-OS endpoint " +
+          "that rate-limits and rejects transactions with -32005 'gas rate " +
+          "limit exceeded'. Edge-Flow asks your wallet to adopt the correct " +
+          "RPC and retries that error automatically, but MetaMask will not " +
+          "overwrite an endpoint you already saved — fix it under " +
+          "Settings > Networks if creates keep failing."
+        }
+      />
+
+      <Section
         title="6 · Contract is source of truth"
         body={
           "The frontend only reads views and submits transactions. Charts and " +

@@ -3,6 +3,7 @@ import { useEffect } from "react";
 export type TxStage =
   | "review"
   | "wallet"
+  | "retrying"
   | "submitted"
   | "waiting"
   | "success"
@@ -14,6 +15,12 @@ const STAGE_COPY: Record<TxStage, { title: string; hint: string }> = {
   wallet: {
     title: "Waiting for wallet",
     hint: "Approve the transaction in your wallet.",
+  },
+  retrying: {
+    title: "Node at capacity",
+    hint:
+      "The Bradbury node is rate-limiting right now. Retrying automatically — " +
+      "no need to approve again.",
   },
   submitted: {
     title: "Submitted",
@@ -35,12 +42,15 @@ export function TxDialog({
   open,
   stage,
   error,
+  retry,
   onClose,
   children,
 }: {
   open: boolean;
   stage: TxStage;
   error?: string;
+  /** Set while a rate-limited write is being re-attempted. */
+  retry?: { attempt: number; maxAttempts: number } | null;
   onClose: () => void;
   children?: React.ReactNode;
 }) {
@@ -67,6 +77,11 @@ export function TxDialog({
         </div>
         <div className="p-5 text-sm text-[var(--ef-ink-dim)] space-y-3">
           <p>{copy.hint}</p>
+          {retry && (
+            <p className="ef-mono text-xs text-[var(--ef-warn)]">
+              attempt {retry.attempt} of {retry.maxAttempts}
+            </p>
+          )}
           {stage === "error" && error && (
             <pre className="text-xs ef-mono whitespace-pre-wrap text-[var(--ef-down)] p-3 rounded border border-[var(--ef-edge)] bg-[var(--ef-panel-2)]">
               {error}

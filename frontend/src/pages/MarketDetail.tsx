@@ -189,6 +189,10 @@ function ActionPanel({
   const [side, setSide] = useState<"UP" | "DOWN">("UP");
   const lockedSide = position?.exists ? position.side : undefined;
 
+  // Whichever write is in flight owns the retry indicator.
+  const activeRetry = take.retry ?? resolve.retry ?? claim.retry ?? null;
+  const busy = take.isPending || resolve.isPending || claim.isPending;
+
   const stakeWei = useMemo(() => {
     try {
       return parseUnits(amount || "0", NATIVE_DECIMALS);
@@ -300,7 +304,7 @@ function ActionPanel({
             </span>
           </label>
           <button
-            disabled={disabled}
+            disabled={disabled || busy}
             onClick={() => {
               setStage("review");
             }}
@@ -314,25 +318,32 @@ function ActionPanel({
       {market.phase === "READY_TO_SETTLE" && (
         <button
           onClick={runResolve}
+          disabled={busy}
           className="w-full py-2 rounded border border-[var(--ef-accent)] text-[var(--ef-accent)] ef-mono text-sm"
         >
-          resolve market
+          {resolve.isPending
+            ? resolve.retry
+              ? `node busy — retrying (${resolve.retry.attempt}/${resolve.retry.maxAttempts})`
+              : "resolving…"
+            : "resolve market"}
         </button>
       )}
 
       {(claimable ?? 0n) > 0n && (
         <button
           onClick={runClaim}
+          disabled={busy}
           className="w-full py-2 rounded bg-[var(--ef-accent)] text-black ef-mono text-sm"
         >
-          claim {formatGen(claimable!)}
+          {claim.isPending ? "claiming…" : `claim ${formatGen(claimable!)}`}
         </button>
       )}
 
       <TxDialog
         open={stage !== null}
-        stage={stage ?? "review"}
+        stage={activeRetry && stage === "wallet" ? "retrying" : stage ?? "review"}
         error={err}
+        retry={activeRetry}
         onClose={() => setStage(null)}
       >
         {stage === "review" && (
@@ -344,9 +355,10 @@ function ActionPanel({
             </p>
             <button
               onClick={runTake}
+              disabled={busy}
               className="w-full py-2 rounded bg-[var(--ef-accent)] text-black ef-mono text-sm"
             >
-              approve in wallet
+              {take.isPending ? "sending…" : "approve in wallet"}
             </button>
           </div>
         )}

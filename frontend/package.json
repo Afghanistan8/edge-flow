@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "lint": "eslint 'src/**/*.{ts,tsx}'",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:retry": "node scripts/retry-classification.test.mjs"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.1.6",

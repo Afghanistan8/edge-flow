@@ -9,7 +9,7 @@ public data sources and only finalizes a direction when both agree.
 
 - **Live app:** https://edge-flow-rose.vercel.app
 - **Network:** GenLayer Bradbury Testnet, **chain id 4221**
-- **RPC:** https://rpc-bradbury.genlayer.com
+- **RPC:** https://rpc-bradbury.genlayer.com — use this in your wallet, **not** the ChainList zkSync-OS endpoint
 - **Explorer:** https://explorer-bradbury.genlayer.com
 - **Contract:** `0x91Bb7FDD22dE81109Eca288F3CC5921352cD637f`
 - **Faucet:** https://testnet-faucet.genlayer.foundation
@@ -147,6 +147,17 @@ outcomes.
 2. **Connect.** The header's Connect button defaults to Bradbury. If your
    wallet is on another chain a yellow banner appears with a one-click
    switch; every write also auto-prompts a switch before signing.
+
+   > **Your wallet must use `https://rpc-bradbury.genlayer.com` for chain
+   > 4221.** ChainList publishes Bradbury with the public zkSync-OS
+   > endpoint `zksync-os-testnet-genlayer.zksync.dev`, which rate-limits
+   > and rejects transactions with
+   > `-32005 transaction gas rate limit exceeded: node is at capacity`.
+   > Edge-Flow asks your wallet to adopt the correct RPC and retries that
+   > error automatically, but MetaMask will not overwrite an endpoint you
+   > already saved. If creates keep failing, open MetaMask →
+   > Settings → Networks → GenLayer Bradbury Testnet and set the RPC URL
+   > to `https://rpc-bradbury.genlayer.com`.
 3. **Create a market** (`/create`): pick an asset and a future GMT+1
    date. The form previews the exact cutoff, settle, and refund times.
    One market per asset per day.

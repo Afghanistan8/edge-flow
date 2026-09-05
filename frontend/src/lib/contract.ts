@@ -1,7 +1,7 @@
 // Typed views on top of the raw genlayer client. Each function returns
 // data shaped for the UI. Errors bubble up so React Query can retry.
 
-import { readContract, writeContract } from "./genlayer";
+import { readContract, writeContract, type WriteProgress } from "./genlayer";
 import type { Asset } from "./config";
 
 export type Phase =
@@ -223,8 +223,12 @@ export function createMarketTx(
   account: string,
   asset: Asset,
   targetDay: string,
+  onProgress?: WriteProgress,
 ) {
-  return writeContract("create_market", [asset, targetDay], { account });
+  return writeContract("create_market", [asset, targetDay], {
+    account,
+    onProgress,
+  });
 }
 
 export function takePositionTx(
@@ -232,17 +236,27 @@ export function takePositionTx(
   marketId: number,
   side: "UP" | "DOWN",
   stakeWei: bigint,
+  onProgress?: WriteProgress,
 ) {
   return writeContract("take_position", [marketId, side], {
     account,
     value: stakeWei,
+    onProgress,
   });
 }
 
-export function resolveMarketTx(account: string, marketId: number) {
-  return writeContract("resolve_market", [marketId], { account });
+export function resolveMarketTx(
+  account: string,
+  marketId: number,
+  onProgress?: WriteProgress,
+) {
+  return writeContract("resolve_market", [marketId], { account, onProgress });
 }
 
-export function claimTx(account: string, marketId: number) {
-  return writeContract("claim", [marketId], { account });
+export function claimTx(
+  account: string,
+  marketId: number,
+  onProgress?: WriteProgress,
+) {
+  return writeContract("claim", [marketId], { account, onProgress });
 }
